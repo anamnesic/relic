@@ -46,6 +46,7 @@ struct LlamaModel {
 
     // Dequantize a tensor to f32
     void dequantize_to_f32(const Tensor &t, float *out) const;
+    void dequantize_rows_to_f32(const Tensor &t, int64_t start_row, int64_t num_rows, float *out) const;
 };
 
 // Half-precision conversion utilities

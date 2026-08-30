@@ -11,6 +11,7 @@
     cl_int err_ = (err); \
     if (err_ != CL_SUCCESS) { \
         fprintf(stderr, "OpenCL error %d at %s:%d: %s\n", err_, __FILE__, __LINE__, msg); \
+        fflush(stderr); \
         return false; \
     } \
 } while(0)
@@ -19,6 +20,7 @@
     cl_int err_ = (err); \
     if (err_ != CL_SUCCESS) { \
         fprintf(stderr, "OpenCL error %d at %s:%d: %s\n", err_, __FILE__, __LINE__, msg); \
+        fflush(stderr); \
         return; \
     } \
 } while(0)

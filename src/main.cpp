@@ -25,6 +25,8 @@ void print_usage(const char *prog) {
 }
 
 int main(int argc, char **argv) {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    setvbuf(stderr, nullptr, _IONBF, 0);
     std::string model_path;
     std::string prompt = "Once upon a time";
     int n_tokens = 256;

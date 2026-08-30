@@ -138,3 +138,43 @@ void LlamaModel::dequantize_to_f32(const Tensor &t, float *out) const {
             break;
     }
 }
+
+void LlamaModel::dequantize_rows_to_f32(const Tensor &t, int64_t start_row, int64_t num_rows, float *out) const {
+    int64_t row_size = t.dims.empty() ? t.nelements() : t.dims[0];
+    int64_t total_rows = t.dims.size() > 1 ? t.dims[1] : (row_size > 0 ? t.nelements() / row_size : 1);
+    num_rows = std::min(num_rows, total_rows - start_row);
+    if (num_rows <= 0) return;
+
+    switch (t.type) {
+        case GgmlType::F32: {
+            const float *src = (const float *)t.data.data();
+            memcpy(out, src + start_row * row_size, (size_t)(num_rows * row_size * sizeof(float)));
+            break;
+        }
+        case GgmlType::F16: {
+            const uint8_t *src = t.data.data() + start_row * row_size * 2;
+            dequantize_f16_row(src, out, num_rows * row_size);
+            break;
+        }
+        case GgmlType::Q4_0: {
+            size_t bytes_per_row = (size_t)((row_size + 31) / 32) * 18;
+            for (int64_t r = 0; r < num_rows; r++) {
+                const uint8_t *src_row = t.data.data() + (start_row + r) * bytes_per_row;
+                dequantize_q4_0_row(src_row, out + r * row_size, row_size);
+            }
+            break;
+        }
+        case GgmlType::Q8_0: {
+            size_t bytes_per_row = (size_t)((row_size + 31) / 32) * 34;
+            for (int64_t r = 0; r < num_rows; r++) {
+                const uint8_t *src_row = t.data.data() + (start_row + r) * bytes_per_row;
+                dequantize_q8_0_row(src_row, out + r * row_size, row_size);
+            }
+            break;
+        }
+        default:
+            fprintf(stderr, "Unsupported type for row dequantization: %d\n", (int)t.type);
+            memset(out, 0, (size_t)(num_rows * row_size * sizeof(float)));
+            break;
+    }
+}

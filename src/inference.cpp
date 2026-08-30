@@ -61,11 +61,17 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
 
     auto t_start = std::chrono::high_resolution_clock::now();
 
+    fprintf(stdout, "Prompt tokens: %zu\n", input_tokens.size());
+    fflush(stdout);
+
     for (int tok : input_tokens) {
         if (forward(tok, logits.data()) != 0) {
             fprintf(stderr, "Forward pass failed during prompt processing\n");
+            fflush(stderr);
             return output;
         }
+        fprintf(stdout, ".");
+        fflush(stdout);
     }
 
     auto t_prompt_done = std::chrono::high_resolution_clock::now();
