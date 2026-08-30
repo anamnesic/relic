@@ -31,6 +31,7 @@ target_compile_definitions(relic_test PRIVATE CL_TARGET_OPENCL_VERSION=120)
 
 add_executable(relic_dump_model
     src/dump_model.cpp
+    src/architecture.cpp
 )
 target_include_directories(relic_dump_model PRIVATE src)
 target_link_libraries(relic_dump_model PRIVATE ${OpenCL_LIBRARIES})

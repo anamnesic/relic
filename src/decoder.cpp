@@ -29,7 +29,6 @@ void silu_cpu(float *out, const float *x, int64_t n) {
 }
 
 void matmul_nt_cpu(float *dst, const float *a, const float *b, int64_t M, int64_t N, int64_t K) {
-    // b is stored as [N, K] (transposed in memory)
     for (int64_t i = 0; i < M; i++) {
         for (int64_t j = 0; j < N; j++) {
             float sum = 0.0f;
@@ -86,7 +85,7 @@ public:
         int64_t scratch_size = n_embd * 3 + q_size + kv_size * 2
                              + n_ff * 2 + n_head * max_seq_len + n_embd;
         act.resize((size_t)scratch_size, 0.0f);
-        weights.resize((size_t)std::max(n_embd * n_vocab_estimate, n_embd * n_ff * 4), 0.0f);
+        weights.resize((size_t)std::max(n_embd * arch.n_vocab, n_embd * n_ff * 4), 0.0f);
         kv_cache.assign((size_t)(arch.n_layer * 2 * max_seq_len * n_embd), 0.0f);
 
         return true;
@@ -156,11 +155,9 @@ public:
 
             memcpy(residual, hidden, n_embd * sizeof(float));
 
-            // Attention RMSNorm
             dequant_run((prefix + "attn_norm.weight").c_str(), weights.data());
             rms_norm_cpu(hidden, hidden, weights.data(), n_embd, 1, arch.norm_eps);
 
-            // QKV projection
             auto w_Q = model.tensors.find(prefix + "attn_q.weight");
             auto w_K = model.tensors.find(prefix + "attn_k.weight");
             auto w_V = model.tensors.find(prefix + "attn_v.weight");
@@ -179,15 +176,12 @@ public:
                 matmul_nt_cpu(v_buf, hidden, weights.data(), 1, kv_size, n_embd);
             }
 
-            // RoPE
             rope_cpu(q_buf, q_size, n_head, position, 1, arch.rope_freq_base);
             rope_cpu(k_buf, kv_size, n_kv_head, position, 1, arch.rope_freq_base);
 
-            // Store KV
             memcpy(k_slice + position * n_embd, k_buf, kv_size * sizeof(float));
             memcpy(v_slice + position * n_embd, v_buf, kv_size * sizeof(float));
 
-            // Causal Attention
             int64_t S = position + 1;
             float inv_scale = 1.0f / sqrtf((float)head_dim);
             int64_t q_per_kv = n_head / n_kv_head;
@@ -203,7 +197,6 @@ public:
                 }
             }
 
-            // Softmax
             for (int64_t h = 0; h < n_head; h++) {
                 int64_t offset = h * S;
                 float maxv = scores[offset];
@@ -217,7 +210,6 @@ public:
                 for (int64_t s = 0; s < S; s++) scores[offset + s] *= inv_sum;
             }
 
-            // Attention output = scores * V
             memset(attn_out, 0, n_embd * sizeof(float));
             for (int64_t h = 0; h < n_head; h++) {
                 int64_t h_kv = h / q_per_kv;
@@ -237,7 +229,6 @@ public:
 
             add_cpu(hidden, residual, attn_out, n_embd);
 
-            // FFN
             memcpy(residual, hidden, n_embd * sizeof(float));
             dequant_run((prefix + "ffn_norm.weight").c_str(), weights.data());
             rms_norm_cpu(hidden, hidden, weights.data(), n_embd, 1, arch.norm_eps);
@@ -265,7 +256,6 @@ public:
             }
         }
 
-        // Final RMSNorm
         auto norm_w = model.tensors.find("output_norm.weight");
         if (norm_w == model.tensors.end()) norm_w = model.tensors.find("norm.weight");
         if (norm_w != model.tensors.end()) {
@@ -273,7 +263,6 @@ public:
             rms_norm_cpu(hidden, hidden, weights.data(), n_embd, 1, arch.norm_eps);
         }
 
-        // Output logits projection
         auto out_w = model.tensors.find("output.weight");
         if (out_w == model.tensors.end()) out_w = model.tensors.find("token_embd.weight");
         if (out_w != model.tensors.end()) {
@@ -288,7 +277,6 @@ private:
     ArchitectureSpec arch;
     OpenClBackend *cl = nullptr;
     int64_t seq_limit = 2048;
-    int64_t n_vocab_estimate = 32000;
     std::vector<float> act;
     std::vector<float> weights;
     std::vector<float> kv_cache;
@@ -312,7 +300,7 @@ public:
         int64_t n_embd = arch.n_embd;
         int64_t n_head = arch.n_head;
         int64_t n_kv_head = arch.n_head_kv;
-        int64_t head_dim = n_embd / n_head;
+        int64_t head_dim = arch.linear_key_head_dim > 0 ? arch.linear_key_head_dim : (n_embd / n_head);
         int64_t n_ff = arch.n_ff;
         int64_t q_size = n_head * head_dim;
         int64_t kv_size = n_kv_head * head_dim;
@@ -320,9 +308,9 @@ public:
         int64_t linear_inner = arch.linear_inner_size;
         int64_t conv_channels = recurrent_state.channels();
 
-        int64_t scratch_size = n_embd * 3 + q_size + kv_size * 2
+        int64_t scratch_size = n_embd * 4 + q_size + kv_size * 2
                              + n_ff * 2 + n_head * max_seq_len + n_embd
-                             + conv_channels * 2 + linear_inner * 2;
+                             + conv_channels * 4 + linear_inner * 2;
         act.resize((size_t)scratch_size, 0.0f);
         weights.resize((size_t)std::max(n_embd * arch.n_vocab, n_embd * n_ff * 4), 0.0f);
         full_attn_kv.assign((size_t)(arch.n_layer * 2 * max_seq_len * n_embd), 0.0f);
@@ -346,7 +334,7 @@ public:
         int64_t n_vocab = arch.n_vocab;
         int64_t n_head = arch.n_head;
         int64_t n_kv_head = arch.n_head_kv;
-        int64_t head_dim = n_embd / n_head;
+        int64_t head_dim = arch.linear_key_head_dim > 0 ? arch.linear_key_head_dim : (n_embd / n_head);
         int64_t n_ff = arch.n_ff;
         int64_t q_size = n_head * head_dim;
         int64_t kv_size = n_kv_head * head_dim;
@@ -372,8 +360,8 @@ public:
         float *scores = up_buf + n_ff;
         float *attn_out = scores + n_head * seq_limit;
         float *conv_in = attn_out + n_embd;
-        float *conv_out = conv_in + conv_channels;
-        float *delta_out = conv_out + conv_channels;
+        float *conv_out = conv_in + conv_channels * 2;
+        float *delta_out = conv_out + conv_channels * 2;
 
         // Embedding lookup
         auto emb_it = model.tensors.find("token_embd.weight");
@@ -393,9 +381,13 @@ public:
             memcpy(hidden, weights.data() + token_id * emb_row_size, (size_t)(emb_row_size * sizeof(float)));
         }
 
-        auto dequant_run = [&](const char *name, float *buf) {
+        auto dequant_run = [&](const char *name, float *buf) -> bool {
             auto it = model.tensors.find(name);
-            if (it != model.tensors.end()) model.dequantize_to_f32(it->second, buf);
+            if (it != model.tensors.end()) {
+                model.dequantize_to_f32(it->second, buf);
+                return true;
+            }
+            return false;
         };
 
         for (int64_t layer = 0; layer < arch.n_layer; layer++) {
@@ -405,12 +397,12 @@ public:
 
             memcpy(residual, hidden, n_embd * sizeof(float));
 
-            // Layer Norm
-            dequant_run((prefix + "attn_norm.weight").c_str(), weights.data());
+            if (!dequant_run((prefix + "attn_norm.weight").c_str(), weights.data())) {
+                dequant_run((prefix + "norm.weight").c_str(), weights.data());
+            }
             rms_norm_cpu(hidden, hidden, weights.data(), n_embd, 1, arch.norm_eps);
 
             if (is_full_attn) {
-                // Full Attention Layer
                 float *k_slice = full_attn_kv.data() + layer * 2 * seq_limit * n_embd;
                 float *v_slice = k_slice + seq_limit * n_embd;
 
@@ -420,16 +412,19 @@ public:
                 auto w_O = model.tensors.find(prefix + "attn_output.weight");
 
                 if (w_Q != model.tensors.end()) {
+                    int64_t actual_q_dim = w_Q->second.dims.size() > 1 ? w_Q->second.dims[1] : q_size;
                     model.dequantize_to_f32(w_Q->second, weights.data());
-                    matmul_nt_cpu(q_buf, hidden, weights.data(), 1, q_size, n_embd);
+                    matmul_nt_cpu(q_buf, hidden, weights.data(), 1, actual_q_dim, n_embd);
                 }
                 if (w_K != model.tensors.end()) {
+                    int64_t actual_k_dim = w_K->second.dims.size() > 1 ? w_K->second.dims[1] : kv_size;
                     model.dequantize_to_f32(w_K->second, weights.data());
-                    matmul_nt_cpu(k_buf, hidden, weights.data(), 1, kv_size, n_embd);
+                    matmul_nt_cpu(k_buf, hidden, weights.data(), 1, actual_k_dim, n_embd);
                 }
                 if (w_V != model.tensors.end()) {
+                    int64_t actual_v_dim = w_V->second.dims.size() > 1 ? w_V->second.dims[1] : kv_size;
                     model.dequantize_to_f32(w_V->second, weights.data());
-                    matmul_nt_cpu(v_buf, hidden, weights.data(), 1, kv_size, n_embd);
+                    matmul_nt_cpu(v_buf, hidden, weights.data(), 1, actual_v_dim, n_embd);
                 }
 
                 rope_cpu(q_buf, q_size, n_head, position, 1, arch.rope_freq_base);
@@ -485,32 +480,36 @@ public:
 
                 add_cpu(hidden, residual, attn_out, n_embd);
             } else {
-                // Recurrent (Gated DeltaNet) Layer
+                // Recurrent layer: support fused attn_qkv or separate attn_q/k/v
+                auto w_qkv = model.tensors.find(prefix + "attn_qkv.weight");
                 auto w_Q = model.tensors.find(prefix + "attn_q.weight");
                 auto w_K = model.tensors.find(prefix + "attn_k.weight");
                 auto w_V = model.tensors.find(prefix + "attn_v.weight");
                 auto w_conv = model.tensors.find(prefix + "ssm_conv1d.weight");
                 auto w_alpha = model.tensors.find(prefix + "ssm_alpha.weight");
                 auto w_beta = model.tensors.find(prefix + "ssm_beta.weight");
-                auto w_O = model.tensors.find(prefix + "attn_output.weight");
+                auto w_O = model.tensors.find(prefix + "ssm_out.weight");
+                if (w_O == model.tensors.end()) w_O = model.tensors.find(prefix + "attn_output.weight");
 
-                // Q projection (size qk_dim)
-                if (w_Q != model.tensors.end()) {
-                    model.dequantize_to_f32(w_Q->second, weights.data());
-                    matmul_nt_cpu(conv_in, hidden, weights.data(), 1, qk_dim, n_embd);
-                }
-                // K projection (size qk_dim)
-                if (w_K != model.tensors.end()) {
-                    model.dequantize_to_f32(w_K->second, weights.data());
-                    matmul_nt_cpu(conv_in + qk_dim, hidden, weights.data(), 1, qk_dim, n_embd);
-                }
-                // V projection (size linear_inner)
-                if (w_V != model.tensors.end()) {
-                    model.dequantize_to_f32(w_V->second, weights.data());
-                    matmul_nt_cpu(conv_in + 2 * qk_dim, hidden, weights.data(), 1, linear_inner, n_embd);
+                if (w_qkv != model.tensors.end()) {
+                    int64_t total_qkv = w_qkv->second.dims.size() > 1 ? w_qkv->second.dims[1] : (2 * qk_dim + linear_inner);
+                    model.dequantize_to_f32(w_qkv->second, weights.data());
+                    matmul_nt_cpu(conv_in, hidden, weights.data(), 1, total_qkv, n_embd);
+                } else {
+                    if (w_Q != model.tensors.end()) {
+                        model.dequantize_to_f32(w_Q->second, weights.data());
+                        matmul_nt_cpu(conv_in, hidden, weights.data(), 1, qk_dim, n_embd);
+                    }
+                    if (w_K != model.tensors.end()) {
+                        model.dequantize_to_f32(w_K->second, weights.data());
+                        matmul_nt_cpu(conv_in + qk_dim, hidden, weights.data(), 1, qk_dim, n_embd);
+                    }
+                    if (w_V != model.tensors.end()) {
+                        model.dequantize_to_f32(w_V->second, weights.data());
+                        matmul_nt_cpu(conv_in + 2 * qk_dim, hidden, weights.data(), 1, linear_inner, n_embd);
+                    }
                 }
 
-                // Causal Depthwise Conv1D
                 if (w_conv != model.tensors.end()) {
                     model.dequantize_to_f32(w_conv->second, weights.data());
                     recurrent_state.conv1d(layer, conv_in, weights.data(), conv_out);
@@ -519,48 +518,48 @@ public:
                     memcpy(conv_out, conv_in, conv_channels * sizeof(float));
                 }
 
-                // Split conv_out into q, k, v
                 float *q_rec = conv_out;
                 float *k_rec = conv_out + qk_dim;
                 float *v_rec = conv_out + 2 * qk_dim;
 
-                // Expand Q & K heads if key_heads < value_heads
-                std::vector<float> q_expanded(value_heads * key_dim);
-                std::vector<float> k_expanded(value_heads * key_dim);
-                int64_t heads_per_group = value_heads / key_heads;
+                std::vector<float> q_expanded((size_t)(value_heads * key_dim));
+                std::vector<float> k_expanded((size_t)(value_heads * key_dim));
+                int64_t heads_per_group = std::max((int64_t)1, value_heads / key_heads);
                 for (int64_t vh = 0; vh < value_heads; vh++) {
                     int64_t kh = vh / heads_per_group;
-                    memcpy(q_expanded.data() + vh * key_dim, q_rec + kh * key_dim, key_dim * sizeof(float));
-                    memcpy(k_expanded.data() + vh * key_dim, k_rec + kh * key_dim, key_dim * sizeof(float));
+                    memcpy(q_expanded.data() + vh * key_dim, q_rec + kh * key_dim, (size_t)(key_dim * sizeof(float)));
+                    memcpy(k_expanded.data() + vh * key_dim, k_rec + kh * key_dim, (size_t)(key_dim * sizeof(float)));
                 }
 
-                // SSM alpha / decay and beta
-                std::vector<float> alpha(value_heads, 0.0f);
-                std::vector<float> beta(value_heads, 1.0f);
+                std::vector<float> alpha((size_t)value_heads, 0.0f);
+                std::vector<float> beta((size_t)value_heads, 1.0f);
                 if (w_alpha != model.tensors.end()) {
-                    model.dequantize_to_f32(w_alpha->second, alpha.data());
+                    model.dequantize_to_f32(w_alpha->second, weights.data());
+                    memcpy(alpha.data(), weights.data(), (size_t)(value_heads * sizeof(float)));
                 }
                 if (w_beta != model.tensors.end()) {
-                    model.dequantize_to_f32(w_beta->second, beta.data());
+                    model.dequantize_to_f32(w_beta->second, weights.data());
+                    memcpy(beta.data(), weights.data(), (size_t)(value_heads * sizeof(float)));
                 }
 
                 recurrent_state.delta_step(layer, q_expanded.data(), k_expanded.data(), v_rec,
                                            alpha.data(), beta.data(), delta_out);
 
-                // Output projection
                 if (w_O != model.tensors.end()) {
                     model.dequantize_to_f32(w_O->second, weights.data());
                     matmul_nt_cpu(attn_out, delta_out, weights.data(), 1, n_embd, linear_inner);
                 } else {
-                    memcpy(attn_out, delta_out, std::min(n_embd, linear_inner) * sizeof(float));
+                    memcpy(attn_out, delta_out, (size_t)(std::min(n_embd, linear_inner) * sizeof(float)));
                 }
 
                 add_cpu(hidden, residual, attn_out, n_embd);
             }
 
-            // SwiGLU FFN
+            // FFN
             memcpy(residual, hidden, n_embd * sizeof(float));
-            dequant_run((prefix + "ffn_norm.weight").c_str(), weights.data());
+            if (!dequant_run((prefix + "ffn_norm.weight").c_str(), weights.data())) {
+                dequant_run((prefix + "post_attention_norm.weight").c_str(), weights.data());
+            }
             rms_norm_cpu(hidden, hidden, weights.data(), n_embd, 1, arch.norm_eps);
 
             auto w_gate = model.tensors.find(prefix + "ffn_gate.weight");

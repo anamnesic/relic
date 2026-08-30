@@ -1,5 +1,6 @@
 #include "inference.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -58,6 +59,8 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
     std::string output;
     std::mt19937 rng(42);
 
+    auto t_start = std::chrono::high_resolution_clock::now();
+
     for (int tok : input_tokens) {
         if (forward(tok, logits.data()) != 0) {
             fprintf(stderr, "Forward pass failed during prompt processing\n");
@@ -65,7 +68,19 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
         }
     }
 
+    auto t_prompt_done = std::chrono::high_resolution_clock::now();
+    double prompt_sec = std::chrono::duration<double>(t_prompt_done - t_start).count();
+    double prompt_speed = (double)input_tokens.size() / (prompt_sec > 0 ? prompt_sec : 1e-6);
+
+    fprintf(stdout, "\n[Benchmark] Prompt: %zu tokens in %.2f ms (%.2f tok/s)\n",
+            input_tokens.size(), prompt_sec * 1000.0, prompt_speed);
+    fprintf(stdout, "Output: ");
+    fflush(stdout);
+
+    int generated_count = 0;
     int last_token = 0;
+    auto t_gen_start = std::chrono::high_resolution_clock::now();
+
     for (int i = 0; i < max_tokens; i++) {
         if (temperature < 0.01f) {
             last_token = (int)(std::max_element(logits.begin(), logits.end()) - logits.begin());
@@ -101,13 +116,22 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
         output += piece;
         fprintf(stdout, "%s", piece.c_str());
         fflush(stdout);
+        generated_count++;
 
         if (forward(last_token, logits.data()) != 0) {
-            fprintf(stderr, "Forward pass failed during token generation\n");
+            fprintf(stderr, "\nForward pass failed during token generation\n");
             break;
         }
     }
 
-    fprintf(stdout, "\n");
+    auto t_gen_done = std::chrono::high_resolution_clock::now();
+    double gen_sec = std::chrono::duration<double>(t_gen_done - t_gen_start).count();
+    double gen_speed = (double)generated_count / (gen_sec > 0 ? gen_sec : 1e-6);
+    double total_sec = std::chrono::duration<double>(t_gen_done - t_start).count();
+
+    fprintf(stdout, "\n\n[Benchmark] Generation: %d tokens in %.2f ms (%.2f tok/s)\n",
+            generated_count, gen_sec * 1000.0, gen_speed);
+    fprintf(stdout, "[Benchmark] Total runtime: %.2f ms\n", total_sec * 1000.0);
+
     return output;
 }
