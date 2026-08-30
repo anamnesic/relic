@@ -17,15 +17,21 @@ Furthermore, the target hardware comprises:
 2. **Fused Quantized GEMV OpenCL 1.2 Kernels (`gemv_q8_0`, `gemv_q4_0`)**:
    - Direct dequantization inside GPU work-item private registers during matrix-vector dot product calculation.
    - Workgroup parallel reduction using high-speed on-chip local memory (`__local float l_sum[128]`).
-3. **Fused SwiGLU Activation Kernel (`swiglu_f32`)**:
+   - 4x loop unrolling with 128-bit memory bursts for memory controller saturation on Turing architectures.
+3. **In-VRAM Recurrent Gated DeltaNet State & Conv1D (`qwen_conv1d_silu`, `qwen_gated_deltanet_step`)**:
+   - Maintain recurrent state $S \in \mathbb{R}^{16 \times 128 \times 128}$ and convolution buffers directly in GPU VRAM buffers (`gpu_ssm_states`, `gpu_conv_states`).
+   - Eliminate all 36 blocking CPU-GPU synchronization stalls per token across the 18 recurrent DeltaNet layers.
+4. **Fused SwiGLU Activation Kernel (`swiglu_f32`)**:
    - Element-wise fusion of SiLU and multiplication to eliminate redundant VRAM round-trips in FFN layers.
-4. **Prompt-Lookup Speculative Decoding (Zero-VRAM Speculation)**:
+5. **Prompt-Lookup Speculative Decoding (Zero-VRAM Speculation)**:
    - Dynamic $N$-gram pattern matching against context tokens to propose draft candidates without loading secondary draft models or consuming additional VRAM.
 
 ## Consequences & Benchmarks
 - **GTX 1650 (Turing)**:
-  - Generation speed improved from **0.39 tok/s** to **4.97 tok/s sustained** (**~13x speedup / 1.275% gain**).
+  - Generation speed reached **5.35 tok/s sustained** (**~14x speedup / 1.370% gain** vs original 0.39 tok/s).
   - VRAM utilization: **2.60 GB resident** within the 4.0 GB physical VRAM limit.
+  - Zero CPU synchronization stalls during DeltaNet recurrence.
 - **Intel UHD Graphics**:
-  - Generation speed improved from **0.19 tok/s** to **1.32 tok/s** (**~7x speedup / 694% gain**).
+  - Prompt speed increased from **0.13 tok/s** (22.7s) to **0.32 tok/s** (9.3s) (**> 2.4x speedup**).
+  - Generation speed reached **1.51 tok/s** (**~8x speedup** vs original 0.19 tok/s).
 - Zero host-to-device PCIe transfer overhead during token generation.

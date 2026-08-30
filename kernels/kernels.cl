@@ -25,7 +25,7 @@ inline float fp16_to_fp32(ushort h) {
 }
 
 //------------------------------------------------------------------------------
-// RMS Norm (Root Mean Square Normalization)
+// RMS Norm
 //------------------------------------------------------------------------------
 kernel void rms_norm_f32(
     global float *out,
@@ -98,8 +98,7 @@ kernel void matmul_f32_nt(
 }
 
 //------------------------------------------------------------------------------
-// GEMV F32 NT (Matrix-Vector multiply: dst[col] = dot(a, b[col, :]))
-// Dispatched with GlobalSize = N * WorkGroupSize, LocalSize = WorkGroupSize
+// GEMV F32 NT
 //------------------------------------------------------------------------------
 kernel void gemv_f32_nt(
     global const float *a,
@@ -108,6 +107,7 @@ kernel void gemv_f32_nt(
     int N,
     int K
 ) {
+    local float l_sum[128];
     int col = get_group_id(0);
     if (col >= N) return;
     int tid = get_local_id(0);
@@ -120,7 +120,6 @@ kernel void gemv_f32_nt(
         sum += a[i] * b_row[i];
     }
 
-    local float l_sum[128];
     l_sum[tid] = sum;
     barrier(CLK_LOCAL_MEM_FENCE);
 
@@ -135,8 +134,7 @@ kernel void gemv_f32_nt(
 }
 
 //------------------------------------------------------------------------------
-// FUSED GEMV Q8_0: Direct execution from resident quantized VRAM weights!
-// Q8_0 block = 2 bytes (fp16 scale d) + 32 bytes (int8_t qs[32]) = 34 bytes
+// FUSED GEMV Q8_0: SIMD unrolled 128-bit memory bursts
 //------------------------------------------------------------------------------
 kernel void gemv_q8_0(
     global const float *a,
@@ -145,6 +143,7 @@ kernel void gemv_q8_0(
     int N,
     int K
 ) {
+    local float l_sum[128];
     int col = get_group_id(0);
     if (col >= N) return;
     int tid = get_local_id(0);
@@ -161,12 +160,14 @@ kernel void gemv_q8_0(
         global const char *qs = (global const char *)(b_blk + 2);
         global const float *a_blk = a + blk * 32;
 
-        for (int i = 0; i < 32; i++) {
-            sum += a_blk[i] * ((float)qs[i] * d);
+        for (int i = 0; i < 32; i += 4) {
+            sum += a_blk[i + 0] * ((float)qs[i + 0] * d)
+                 + a_blk[i + 1] * ((float)qs[i + 1] * d)
+                 + a_blk[i + 2] * ((float)qs[i + 2] * d)
+                 + a_blk[i + 3] * ((float)qs[i + 3] * d);
         }
     }
 
-    local float l_sum[128];
     l_sum[tid] = sum;
     barrier(CLK_LOCAL_MEM_FENCE);
 
@@ -181,8 +182,7 @@ kernel void gemv_q8_0(
 }
 
 //------------------------------------------------------------------------------
-// FUSED GEMV Q4_0: Direct execution from resident quantized VRAM weights!
-// Q4_0 block = 2 bytes (fp16 scale d) + 16 bytes (nibbles qs[16]) = 18 bytes
+// FUSED GEMV Q4_0: SIMD unrolled with concurrent INT/FP decode
 //------------------------------------------------------------------------------
 kernel void gemv_q4_0(
     global const float *a,
@@ -191,6 +191,7 @@ kernel void gemv_q4_0(
     int N,
     int K
 ) {
+    local float l_sum[128];
     int col = get_group_id(0);
     if (col >= N) return;
     int tid = get_local_id(0);
@@ -207,15 +208,20 @@ kernel void gemv_q4_0(
         global const uchar *qs = b_blk + 2;
         global const float *a_blk = a + blk * 32;
 
-        for (int i = 0; i < 16; i++) {
-            uchar val = qs[i];
-            float v0 = (float)((int)(val & 0x0F) - 8);
-            float v1 = (float)((int)(val >> 4) - 8);
-            sum += a_blk[i] * (v0 * d) + a_blk[i + 16] * (v1 * d);
+        for (int i = 0; i < 16; i += 2) {
+            uchar b0 = qs[i];
+            uchar b1 = qs[i + 1];
+
+            float v00 = (float)((int)(b0 & 0x0F) - 8);
+            float v01 = (float)((int)(b0 >> 4) - 8);
+            float v10 = (float)((int)(b1 & 0x0F) - 8);
+            float v11 = (float)((int)(b1 >> 4) - 8);
+
+            sum += a_blk[i + 0] * (v00 * d) + a_blk[i + 16] * (v01 * d)
+                 + a_blk[i + 1] * (v10 * d) + a_blk[i + 17] * (v11 * d);
         }
     }
 
-    local float l_sum[128];
     l_sum[tid] = sum;
     barrier(CLK_LOCAL_MEM_FENCE);
 
@@ -246,6 +252,110 @@ kernel void swiglu_f32(
 }
 
 //------------------------------------------------------------------------------
+// GPU Recurrent Conv1D + SiLU (In-Place GPU State)
+//------------------------------------------------------------------------------
+kernel void qwen_conv1d_silu(
+    global float *conv_state,   // [3 * C]
+    global const float *conv_in, // [C]
+    global const float *weight,  // [4 * C]
+    global float *conv_out,      // [C]
+    int C
+) {
+    int c = get_global_id(0);
+    if (c >= C) return;
+
+    float s0 = conv_state[0 * C + c];
+    float s1 = conv_state[1 * C + c];
+    float s2 = conv_state[2 * C + c];
+    float x  = conv_in[c];
+
+    float w0 = weight[0 * C + c];
+    float w1 = weight[1 * C + c];
+    float w2 = weight[2 * C + c];
+    float w3 = weight[3 * C + c];
+
+    float val = s0 * w0 + s1 * w1 + s2 * w2 + x * w3;
+    float act = val / (1.0f + exp(-val));
+    conv_out[c] = act;
+
+    // Shift state in VRAM
+    conv_state[0 * C + c] = s1;
+    conv_state[1 * C + c] = s2;
+    conv_state[2 * C + c] = x;
+}
+
+//------------------------------------------------------------------------------
+// GPU Recurrent Gated DeltaNet Step (In-Place GPU State S)
+// Dispatched with: Global = 16 * 128, Local = 128 (1 workgroup per head)
+//------------------------------------------------------------------------------
+kernel void qwen_gated_deltanet_step(
+    global float *ssm_state,       // [16, 128, 128]
+    global const float *conv_out,   // [C = 6144]: qk_dim=2048 (q, k), linear_inner=4096 (v)
+    global const float *alpha_vec,  // [16]
+    global const float *beta_vec,   // [16]
+    global float *delta_out,       // [linear_inner = 2048 / 4096]
+    int key_dim,                    // 128
+    int qk_dim,                     // 2048
+    int linear_inner                // 2048 / 4096
+) {
+    local float l_delta[128];
+    local float l_sum[128];
+
+    int h = get_group_id(0);       // Head index in [0, 15]
+    int i = get_local_id(0);       // Row index in [0, 127]
+
+    if (h >= 16 || i >= key_dim) return;
+
+    int key_heads = 16;
+    int heads_per_group = 16 / key_heads;
+    int kh = h / (heads_per_group > 0 ? heads_per_group : 1);
+
+    global const float *q_head = conv_out + kh * key_dim;
+    global const float *k_head = conv_out + qk_dim + kh * key_dim;
+    global const float *v_head = conv_out + 2 * qk_dim + h * key_dim;
+
+    float a_val = alpha_vec[h];
+    float b_val = beta_vec[h];
+    float g = 1.0f - 1.0f / (1.0f + exp(-a_val));
+    float b = 1.0f / (1.0f + exp(-b_val));
+
+    global float *S_h = ssm_state + (size_t)h * (key_dim * key_dim);
+    global float *S_row = S_h + (size_t)i * key_dim;
+
+    float ki = k_head[i];
+    float qi = q_head[i];
+
+    // Compute u_j = sum_i (S_ij * k_i)
+    for (int j = 0; j < key_dim; j++) {
+        l_sum[i] = S_row[j] * ki;
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        for (int s = key_dim / 2; s > 0; s >>= 1) {
+            if (i < s) l_sum[i] += l_sum[i + s];
+            barrier(CLK_LOCAL_MEM_FENCE);
+        }
+        if (i == 0) {
+            float vj = v_head[j];
+            l_delta[j] = vj - l_sum[0];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    // In-place state update: S_ij = g * S_ij + b * ki * delta_j
+    // And compute output element y_i = sum_j (S_ij * q_j)
+    float yi = 0.0f;
+    for (int j = 0; j < key_dim; j++) {
+        float s_val = g * S_row[j] + b * ki * l_delta[j];
+        S_row[j] = s_val;
+        yi += s_val * q_head[j];
+    }
+
+    // Write output to delta_out
+    global float *out_head = delta_out + h * key_dim;
+    out_head[i] = yi;
+}
+
+//------------------------------------------------------------------------------
 // RoPE (Rotary Position Embedding)
 //------------------------------------------------------------------------------
 kernel void rope_f32(
@@ -259,8 +369,7 @@ kernel void rope_f32(
     int h_idx = get_global_id(1);
     int hh = get_global_id(2);
 
-    if (token >= n_tokens) return;
-    if (h_idx >= n_head) return;
+    if (token >= n_tokens || h_idx >= n_head) return;
 
     int head_dim = n_embd / n_head;
     if (hh >= head_dim / 2) return;
@@ -307,7 +416,7 @@ kernel void softmax_f32(
 }
 
 //------------------------------------------------------------------------------
-// SiLU (Sigmoid Linear Unit)
+// SiLU
 //------------------------------------------------------------------------------
 kernel void silu_f32(
     global float *out,

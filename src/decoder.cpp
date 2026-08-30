@@ -284,7 +284,7 @@ private:
 };
 
 //------------------------------------------------------------------------------
-// Hexagonal Adapter: Qwen35DecoderAdapter (GPU Resident & Fused Kernels)
+// Hexagonal Adapter: Qwen35DecoderAdapter (Pure GPU In-VRAM Recurrent State)
 //------------------------------------------------------------------------------
 
 class Qwen35DecoderAdapter final : public ArchitectureDecoder {
@@ -338,6 +338,7 @@ public:
             gpu_up.alloc(cl->dev.context, (size_t)n_ff * sizeof(float));
             gpu_ffn_act.alloc(cl->dev.context, (size_t)n_ff * sizeof(float));
             gpu_conv_in.alloc(cl->dev.context, (size_t)total_qkv * sizeof(float));
+            gpu_conv_out.alloc(cl->dev.context, (size_t)total_qkv * sizeof(float));
             gpu_delta_out.alloc(cl->dev.context, (size_t)linear_inner * sizeof(float));
             gpu_q.alloc(cl->dev.context, (size_t)q_size * sizeof(float));
             gpu_k.alloc(cl->dev.context, (size_t)kv_size * sizeof(float));
@@ -345,6 +346,16 @@ public:
             gpu_alpha.alloc(cl->dev.context, (size_t)arch.linear_value_heads * sizeof(float));
             gpu_beta.alloc(cl->dev.context, (size_t)arch.linear_value_heads * sizeof(float));
             gpu_logits.alloc(cl->dev.context, (size_t)arch.n_vocab * sizeof(float));
+
+            // Allocate in-VRAM GPU recurrent state
+            gpu_ssm_states.resize((size_t)arch.n_layer);
+            gpu_conv_states.resize((size_t)arch.n_layer);
+            for (size_t l = 0; l < (size_t)arch.n_layer; l++) {
+                gpu_ssm_states[l].alloc(cl->dev.context, 16 * 128 * 128 * sizeof(float));
+                gpu_conv_states[l].alloc(cl->dev.context, 3 * total_qkv * sizeof(float));
+                cl->fill(gpu_ssm_states[l], 0.0f, 16 * 128 * 128);
+                cl->fill(gpu_conv_states[l], 0.0f, 3 * total_qkv);
+            }
         }
 
         return true;
@@ -354,6 +365,13 @@ public:
         recurrent_state.reset();
         std::fill(full_attn_kv.begin(), full_attn_kv.end(), 0.0f);
         std::fill(act.begin(), act.end(), 0.0f);
+        if (use_gpu && cl && cl->initialized) {
+            int64_t total_qkv = 2 * arch.linear_key_heads * arch.linear_key_head_dim + arch.linear_inner_size;
+            for (size_t l = 0; l < gpu_ssm_states.size(); l++) {
+                if (gpu_ssm_states[l].mem) cl->fill(gpu_ssm_states[l], 0.0f, 16 * 128 * 128);
+                if (gpu_conv_states[l].mem) cl->fill(gpu_conv_states[l], 0.0f, 3 * total_qkv);
+            }
+        }
     }
 
     void ensure_weights_uploaded(const LlamaModel &model) {
@@ -610,37 +628,17 @@ public:
                         dispatch_gemv(gpu_beta, gpu_hidden, prefix + "ssm_beta.weight", w_beta->second, value_heads, n_embd);
                     }
 
-                    clEnqueueReadBuffer(cl->dev.queue, gpu_conv_in.mem, CL_FALSE, 0, (size_t)(total_qkv * sizeof(float)), conv_in, 0, nullptr, nullptr);
-                    std::vector<float> alpha((size_t)value_heads, 0.0f);
-                    std::vector<float> beta((size_t)value_heads, 1.0f);
-                    clEnqueueReadBuffer(cl->dev.queue, gpu_alpha.mem, CL_FALSE, 0, (size_t)(value_heads * sizeof(float)), alpha.data(), 0, nullptr, nullptr);
-                    clEnqueueReadBuffer(cl->dev.queue, gpu_beta.mem, CL_TRUE, 0, (size_t)(value_heads * sizeof(float)), beta.data(), 0, nullptr, nullptr);
-
-                    if (w_conv != model.tensors.end()) {
-                        model.dequantize_to_f32(w_conv->second, weights.data());
-                        recurrent_state.conv1d(layer, conv_in, weights.data(), conv_out);
-                        silu_cpu(conv_out, conv_out, total_qkv);
+                    // Pure GPU in-VRAM Conv1D
+                    ClBuffer *w_conv_buf = gpu_store.get(prefix + "ssm_conv1d.weight");
+                    if (w_conv_buf) {
+                        cl->qwen_conv1d(gpu_conv_states[layer], gpu_conv_in, *w_conv_buf, gpu_conv_out, total_qkv);
                     } else {
-                        memcpy(conv_out, conv_in, total_qkv * sizeof(float));
+                        cl->copy(gpu_conv_out, gpu_conv_in, total_qkv);
                     }
 
-                    float *q_rec = conv_out;
-                    float *k_rec = conv_out + qk_dim;
-                    float *v_rec = conv_out + 2 * qk_dim;
-
-                    std::vector<float> q_expanded((size_t)(value_heads * key_dim));
-                    std::vector<float> k_expanded((size_t)(value_heads * key_dim));
-                    int64_t heads_per_group = std::max((int64_t)1, value_heads / key_heads);
-                    for (int64_t vh = 0; vh < value_heads; vh++) {
-                        int64_t kh = vh / heads_per_group;
-                        memcpy(q_expanded.data() + vh * key_dim, q_rec + kh * key_dim, (size_t)(key_dim * sizeof(float)));
-                        memcpy(k_expanded.data() + vh * key_dim, k_rec + kh * key_dim, (size_t)(key_dim * sizeof(float)));
-                    }
-
-                    recurrent_state.delta_step(layer, q_expanded.data(), k_expanded.data(), v_rec,
-                                               alpha.data(), beta.data(), delta_out);
-
-                    clEnqueueWriteBuffer(cl->dev.queue, gpu_delta_out.mem, CL_FALSE, 0, (size_t)(linear_inner * sizeof(float)), delta_out, 0, nullptr, nullptr);
+                    // Pure GPU in-VRAM Gated DeltaNet Step (Zero CPU-GPU sync!)
+                    cl->qwen_deltanet(gpu_ssm_states[layer], gpu_conv_out, gpu_alpha, gpu_beta, gpu_delta_out,
+                                      key_dim, qk_dim, linear_inner);
 
                     if (w_O != model.tensors.end()) {
                         dispatch_gemv(gpu_attn_out, gpu_delta_out, prefix + "ssm_out.weight", w_O->second, n_embd, linear_inner);
@@ -927,6 +925,7 @@ private:
     ClBuffer gpu_up;
     ClBuffer gpu_ffn_act;
     ClBuffer gpu_conv_in;
+    ClBuffer gpu_conv_out;
     ClBuffer gpu_delta_out;
     ClBuffer gpu_q;
     ClBuffer gpu_k;
@@ -938,6 +937,9 @@ private:
     ClBuffer gpu_act_a;
     ClBuffer gpu_act_dst;
     ClBuffer gpu_weights;
+
+    std::vector<ClBuffer> gpu_ssm_states;
+    std::vector<ClBuffer> gpu_conv_states;
 };
 
 } // namespace

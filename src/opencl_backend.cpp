@@ -428,3 +428,43 @@ void OpenClBackend::swiglu(ClBuffer &dst, ClBuffer &gate, ClBuffer &up, int64_t 
     size_t global = (size_t)n;
     CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, nullptr, 0, nullptr, nullptr), "swiglu_f32");
 }
+
+void OpenClBackend::qwen_conv1d(ClBuffer &conv_state, ClBuffer &conv_in, ClBuffer &weight, ClBuffer &conv_out, int64_t C) {
+    static ClKernel knl;
+    if (!knl.kernel) {
+        build_kernel(knl, caicos_kernel_source, "qwen_conv1d_silu");
+    }
+
+    clSetKernelArg(knl.kernel, 0, sizeof(cl_mem), &conv_state.mem);
+    clSetKernelArg(knl.kernel, 1, sizeof(cl_mem), &conv_in.mem);
+    clSetKernelArg(knl.kernel, 2, sizeof(cl_mem), &weight.mem);
+    clSetKernelArg(knl.kernel, 3, sizeof(cl_mem), &conv_out.mem);
+    cl_int channels = (cl_int)C;
+    clSetKernelArg(knl.kernel, 4, sizeof(cl_int), &channels);
+
+    size_t global = (size_t)C;
+    CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, nullptr, 0, nullptr, nullptr), "qwen_conv1d_silu");
+}
+
+void OpenClBackend::qwen_deltanet(ClBuffer &ssm_state, ClBuffer &conv_out, ClBuffer &alpha, ClBuffer &beta, ClBuffer &delta_out, int64_t key_dim, int64_t qk_dim, int64_t linear_inner) {
+    static ClKernel knl;
+    if (!knl.kernel) {
+        build_kernel(knl, caicos_kernel_source, "qwen_gated_deltanet_step");
+    }
+
+    clSetKernelArg(knl.kernel, 0, sizeof(cl_mem), &ssm_state.mem);
+    clSetKernelArg(knl.kernel, 1, sizeof(cl_mem), &conv_out.mem);
+    clSetKernelArg(knl.kernel, 2, sizeof(cl_mem), &alpha.mem);
+    clSetKernelArg(knl.kernel, 3, sizeof(cl_mem), &beta.mem);
+    clSetKernelArg(knl.kernel, 4, sizeof(cl_mem), &delta_out.mem);
+    cl_int kd = (cl_int)key_dim;
+    cl_int qkd = (cl_int)qk_dim;
+    cl_int li = (cl_int)linear_inner;
+    clSetKernelArg(knl.kernel, 5, sizeof(cl_int), &kd);
+    clSetKernelArg(knl.kernel, 6, sizeof(cl_int), &qkd);
+    clSetKernelArg(knl.kernel, 7, sizeof(cl_int), &li);
+
+    size_t local = 128;
+    size_t global = 16 * local; // 16 heads * 128 work items
+    CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr), "qwen_gated_deltanet_step");
+}
