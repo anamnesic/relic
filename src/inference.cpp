@@ -45,6 +45,32 @@ int InferenceEngine::forward(int token_id, float *logits) {
     return res;
 }
 
+std::vector<int> InferenceEngine::find_prompt_lookup_draft(const std::vector<int> &tokens, int ngram_len, int max_draft) {
+    std::vector<int> draft;
+    if ((int)tokens.size() < ngram_len + 1) return draft;
+
+    int n = (int)tokens.size();
+    const int *cur_ngram = &tokens[n - ngram_len];
+
+    // Search backwards in the context history for a matching n-gram
+    for (int i = n - ngram_len - 1; i >= ngram_len; i--) {
+        bool match = true;
+        for (int k = 0; k < ngram_len; k++) {
+            if (tokens[i - ngram_len + k] != cur_ngram[k]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            for (int d = 0; d < max_draft && (i + d) < (n - ngram_len); d++) {
+                draft.push_back(tokens[i + d]);
+            }
+            break;
+        }
+    }
+    return draft;
+}
+
 std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
                                       float temperature, int top_k) {
     if (!tokenizer || !model || !decoder) return "";
@@ -56,6 +82,7 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
     }
 
     std::vector<float> logits((size_t)model->n_vocab, 0.0f);
+    std::vector<int> all_tokens = input_tokens;
     std::string output;
     std::mt19937 rng(42);
 
@@ -80,53 +107,86 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
 
     fprintf(stdout, "\n[Benchmark] Prompt: %zu tokens in %.2f ms (%.2f tok/s)\n",
             input_tokens.size(), prompt_sec * 1000.0, prompt_speed);
+    if (enable_speculative) {
+        fprintf(stdout, "[Speculation] Prompt-Lookup Speculative Decoding Active (N-gram=%d, DraftMax=%d)\n",
+                speculative_ngram, speculative_max_draft);
+    }
     fprintf(stdout, "Output: ");
     fflush(stdout);
 
     int generated_count = 0;
+    int accepted_spec_tokens = 0;
     int last_token = 0;
     auto t_gen_start = std::chrono::high_resolution_clock::now();
 
-    for (int i = 0; i < max_tokens; i++) {
+    auto sample_token = [&](std::vector<float> &l_vec) -> int {
         if (temperature < 0.01f) {
-            last_token = (int)(std::max_element(logits.begin(), logits.end()) - logits.begin());
-        } else {
-            for (auto &l : logits) l /= temperature;
-            if (top_k > 0 && top_k < (int)logits.size()) {
-                std::vector<std::pair<float, int>> scored;
-                for (int j = 0; j < (int)logits.size(); j++)
-                    scored.emplace_back(logits[j], j);
-                std::partial_sort(scored.begin(), scored.begin() + top_k, scored.end(),
-                                  [](auto &a, auto &b) { return a.first > b.first; });
-                float threshold = scored[top_k - 1].first;
-                for (int j = 0; j < (int)logits.size(); j++)
-                    if (logits[j] < threshold) logits[j] = -INFINITY;
-            }
-            float maxv = logits[0];
-            for (auto &l : logits) if (l > maxv) maxv = l;
-            float sum = 0.0f;
-            for (auto &l : logits) { l = expf(l - maxv); sum += l; }
-            float inv = 1.0f / sum;
-            for (auto &l : logits) l *= inv;
-            float r = (float)rng() / (float)rng.max();
-            float cum = 0.0f;
-            last_token = (int)logits.size() - 1;
-            for (int j = 0; j < (int)logits.size(); j++) {
-                cum += logits[j];
-                if (r < cum) { last_token = j; break; }
-            }
+            return (int)(std::max_element(l_vec.begin(), l_vec.end()) - l_vec.begin());
         }
+        for (auto &l : l_vec) l /= temperature;
+        if (top_k > 0 && top_k < (int)l_vec.size()) {
+            std::vector<std::pair<float, int>> scored;
+            for (int j = 0; j < (int)l_vec.size(); j++)
+                scored.emplace_back(l_vec[j], j);
+            std::partial_sort(scored.begin(), scored.begin() + top_k, scored.end(),
+                              [](auto &a, auto &b) { return a.first > b.first; });
+            float threshold = scored[top_k - 1].first;
+            for (int j = 0; j < (int)l_vec.size(); j++)
+                if (l_vec[j] < threshold) l_vec[j] = -INFINITY;
+        }
+        float maxv = l_vec[0];
+        for (auto &l : l_vec) if (l > maxv) maxv = l;
+        float sum = 0.0f;
+        for (auto &l : l_vec) { l = expf(l - maxv); sum += l; }
+        float inv = 1.0f / sum;
+        for (auto &l : l_vec) l *= inv;
+        float r = (float)rng() / (float)rng.max();
+        float cum = 0.0f;
+        int choice = (int)l_vec.size() - 1;
+        for (int j = 0; j < (int)l_vec.size(); j++) {
+            cum += l_vec[j];
+            if (r < cum) { choice = j; break; }
+        }
+        return choice;
+    };
+
+    while (generated_count < max_tokens) {
+        last_token = sample_token(logits);
 
         if (last_token == tokenizer->eos_id) break;
         std::string piece = tokenizer->decode({last_token});
         output += piece;
         fprintf(stdout, "%s", piece.c_str());
         fflush(stdout);
+        all_tokens.push_back(last_token);
         generated_count++;
 
         if (forward(last_token, logits.data()) != 0) {
             fprintf(stderr, "\nForward pass failed during token generation\n");
             break;
+        }
+
+        // Speculative decoding verification loop
+        if (enable_speculative && generated_count < max_tokens) {
+            std::vector<int> drafts = find_prompt_lookup_draft(all_tokens, speculative_ngram, speculative_max_draft);
+            for (int draft_tok : drafts) {
+                if (generated_count >= max_tokens) break;
+                int target_pred = sample_token(logits);
+                if (target_pred == draft_tok) {
+                    // Speculative draft accepted!
+                    accepted_spec_tokens++;
+                    if (draft_tok == tokenizer->eos_id) break;
+                    std::string draft_piece = tokenizer->decode({draft_tok});
+                    output += draft_piece;
+                    fprintf(stdout, "%s", draft_piece.c_str());
+                    fflush(stdout);
+                    all_tokens.push_back(draft_tok);
+                    generated_count++;
+                    if (forward(draft_tok, logits.data()) != 0) break;
+                } else {
+                    break;
+                }
+            }
         }
     }
 
@@ -135,9 +195,12 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
     double gen_speed = (double)generated_count / (gen_sec > 0 ? gen_sec : 1e-6);
     double total_sec = std::chrono::duration<double>(t_gen_done - t_start).count();
 
-    fprintf(stdout, "\n\n[Benchmark] Generation: %d tokens in %.2f ms (%.2f tok/s)\n",
+    fprintf(stdout, "\n\n[Benchmark] Generation: %d tokens in %.2f ms (%.2f tok/s)",
             generated_count, gen_sec * 1000.0, gen_speed);
-    fprintf(stdout, "[Benchmark] Total runtime: %.2f ms\n", total_sec * 1000.0);
+    if (enable_speculative) {
+        fprintf(stdout, " [Accepted Speculative: %d tokens]", accepted_spec_tokens);
+    }
+    fprintf(stdout, "\n[Benchmark] Total runtime: %.2f ms\n", total_sec * 1000.0);
 
     return output;
 }

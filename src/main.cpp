@@ -36,6 +36,9 @@ int main(int argc, char **argv) {
     int device_idx = 0;
     bool list_devices = false;
     bool cpu_only = false;
+    bool speculative = false;
+    int speculative_ngram = 3;
+    int speculative_draft_max = 3;
     int max_seq_len = 2048;
 
     for (int i = 1; i < argc; i++) {
@@ -48,6 +51,9 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--platform") == 0 && i + 1 < argc) platform_idx = atoi(argv[++i]);
         else if (strcmp(argv[i], "--device") == 0 && i + 1 < argc) device_idx = atoi(argv[++i]);
         else if (strcmp(argv[i], "--cpu") == 0) cpu_only = true;
+        else if (strcmp(argv[i], "--speculative") == 0) speculative = true;
+        else if (strcmp(argv[i], "--ngram") == 0 && i + 1 < argc) speculative_ngram = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--draft-max") == 0 && i + 1 < argc) speculative_draft_max = atoi(argv[++i]);
         else if (strcmp(argv[i], "--max-seq-len") == 0 && i + 1 < argc) max_seq_len = atoi(argv[++i]);
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
@@ -135,6 +141,10 @@ int main(int argc, char **argv) {
 
     // Initialize inference engine
     InferenceEngine engine;
+    engine.enable_speculative = speculative;
+    engine.speculative_ngram = speculative_ngram;
+    engine.speculative_max_draft = speculative_draft_max;
+
     if (!engine.init(&model, &tokenizer, cl_ok ? &cl : nullptr, max_seq_len)) {
         fprintf(stderr, "Failed to initialize inference engine\n");
         return 1;
