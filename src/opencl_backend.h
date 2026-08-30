@@ -2,6 +2,7 @@
 #include <CL/cl.h>
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -88,6 +89,12 @@ struct OpenClBackend {
     void shutdown();
     bool build_kernel(ClKernel &k, const char *source, const char *kname, const char *opts = "");
 
+    // High-performance GEMV and fused kernels
+    void gemv_f32_nt(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t N, int64_t K);
+    void gemv_q8_0(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t N, int64_t K);
+    void gemv_q4_0(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t N, int64_t K);
+    void swiglu(ClBuffer &dst, ClBuffer &gate, ClBuffer &up, int64_t n);
+
     // Core operations
     void rms_norm(ClBuffer &out, ClBuffer &x, ClBuffer &weight, int64_t n, int64_t rows);
     void matmul_f32(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t M, int64_t N, int64_t K);
@@ -99,6 +106,34 @@ struct OpenClBackend {
     void mul(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t n);
     void copy(ClBuffer &dst, ClBuffer &src, int64_t n);
     void fill(ClBuffer &buf, float val, int64_t n);
+};
+
+struct GpuTensorStore {
+    std::unordered_map<std::string, ClBuffer> buffers;
+
+    bool upload(cl_context ctx, cl_command_queue queue, const std::string &name, const void *data, size_t bytes) {
+        if (!data || bytes == 0) return false;
+        ClBuffer buf;
+        if (!buf.alloc(ctx, bytes)) {
+            return false;
+        }
+        cl_int err = clEnqueueWriteBuffer(queue, buf.mem, CL_FALSE, 0, bytes, data, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) {
+            return false;
+        }
+        buffers[name] = std::move(buf);
+        return true;
+    }
+
+    ClBuffer *get(const std::string &name) {
+        auto it = buffers.find(name);
+        if (it != buffers.end()) return &it->second;
+        return nullptr;
+    }
+
+    void clear() {
+        buffers.clear();
+    }
 };
 
 extern const char *caicos_kernel_source;
