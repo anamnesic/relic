@@ -372,7 +372,7 @@ void OpenClBackend::gemv_f32_nt(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t
     clSetKernelArg(knl.kernel, 3, sizeof(cl_int), &n);
     clSetKernelArg(knl.kernel, 4, sizeof(cl_int), &k);
 
-    size_t local = 64;
+    size_t local = 32;
     size_t global = (size_t)N * local;
     CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr), "gemv_f32_nt");
 }
@@ -390,7 +390,7 @@ void OpenClBackend::gemv_q8_0(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t N
     clSetKernelArg(knl.kernel, 3, sizeof(cl_int), &n);
     clSetKernelArg(knl.kernel, 4, sizeof(cl_int), &k);
 
-    size_t local = 64;
+    size_t local = 32;
     size_t global = (size_t)N * local;
     CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr), "gemv_q8_0");
 }
@@ -408,7 +408,7 @@ void OpenClBackend::gemv_q4_0(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t N
     clSetKernelArg(knl.kernel, 3, sizeof(cl_int), &n);
     clSetKernelArg(knl.kernel, 4, sizeof(cl_int), &k);
 
-    size_t local = 64;
+    size_t local = 32;
     size_t global = (size_t)N * local;
     CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr), "gemv_q4_0");
 }
@@ -427,6 +427,25 @@ void OpenClBackend::swiglu(ClBuffer &dst, ClBuffer &gate, ClBuffer &up, int64_t 
 
     size_t global = (size_t)n;
     CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, nullptr, 0, nullptr, nullptr), "swiglu_f32");
+}
+
+void OpenClBackend::add_rms_norm(ClBuffer &residual, ClBuffer &branch, ClBuffer &weight, ClBuffer &norm_out, int64_t n, float eps) {
+    static ClKernel knl;
+    if (!knl.kernel) {
+        build_kernel(knl, caicos_kernel_source, "add_rms_norm_f32");
+    }
+
+    clSetKernelArg(knl.kernel, 0, sizeof(cl_mem), &residual.mem);
+    clSetKernelArg(knl.kernel, 1, sizeof(cl_mem), &branch.mem);
+    clSetKernelArg(knl.kernel, 2, sizeof(cl_mem), &weight.mem);
+    clSetKernelArg(knl.kernel, 3, sizeof(cl_mem), &norm_out.mem);
+    cl_int count = (cl_int)n;
+    clSetKernelArg(knl.kernel, 4, sizeof(cl_int), &count);
+    cl_float e = (cl_float)eps;
+    clSetKernelArg(knl.kernel, 5, sizeof(cl_float), &e);
+
+    size_t global = 1;
+    CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, nullptr, 0, nullptr, nullptr), "add_rms_norm_f32");
 }
 
 void OpenClBackend::qwen_conv1d(ClBuffer &conv_state, ClBuffer &conv_in, ClBuffer &weight, ClBuffer &conv_out, int64_t C) {
@@ -467,4 +486,29 @@ void OpenClBackend::qwen_deltanet(ClBuffer &ssm_state, ClBuffer &conv_out, ClBuf
     size_t local = 128;
     size_t global = 16 * local; // 16 heads * 128 work items
     CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr), "qwen_gated_deltanet_step");
+}
+
+void OpenClBackend::qwen_attention_step(ClBuffer &q_buf, ClBuffer &k_buf, ClBuffer &v_buf, ClBuffer &k_cache, ClBuffer &v_cache, ClBuffer &attn_out, int64_t n_head, int64_t n_kv_head, int64_t head_dim, int64_t n_embd, int64_t pos, int64_t max_seq) {
+    static ClKernel knl;
+    if (!knl.kernel) {
+        build_kernel(knl, caicos_kernel_source, "qwen_full_attention_step");
+    }
+
+    clSetKernelArg(knl.kernel, 0, sizeof(cl_mem), &q_buf.mem);
+    clSetKernelArg(knl.kernel, 1, sizeof(cl_mem), &k_buf.mem);
+    clSetKernelArg(knl.kernel, 2, sizeof(cl_mem), &v_buf.mem);
+    clSetKernelArg(knl.kernel, 3, sizeof(cl_mem), &k_cache.mem);
+    clSetKernelArg(knl.kernel, 4, sizeof(cl_mem), &v_cache.mem);
+    clSetKernelArg(knl.kernel, 5, sizeof(cl_mem), &attn_out.mem);
+    cl_int nh = (cl_int)n_head, nkv = (cl_int)n_kv_head, hd = (cl_int)head_dim, ne = (cl_int)n_embd, p = (cl_int)pos, ms = (cl_int)max_seq;
+    clSetKernelArg(knl.kernel, 6, sizeof(cl_int), &nh);
+    clSetKernelArg(knl.kernel, 7, sizeof(cl_int), &nkv);
+    clSetKernelArg(knl.kernel, 8, sizeof(cl_int), &hd);
+    clSetKernelArg(knl.kernel, 9, sizeof(cl_int), &ne);
+    clSetKernelArg(knl.kernel, 10, sizeof(cl_int), &p);
+    clSetKernelArg(knl.kernel, 11, sizeof(cl_int), &ms);
+
+    size_t local = (size_t)head_dim;
+    size_t global = (size_t)n_head * local;
+    CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr), "qwen_full_attention_step");
 }

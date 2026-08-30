@@ -284,7 +284,7 @@ private:
 };
 
 //------------------------------------------------------------------------------
-// Hexagonal Adapter: Qwen35DecoderAdapter (Pure GPU In-VRAM Recurrent State)
+// Hexagonal Adapter: Qwen35DecoderAdapter (100% GPU VRAM In-Place Inference)
 //------------------------------------------------------------------------------
 
 class Qwen35DecoderAdapter final : public ArchitectureDecoder {
@@ -347,14 +347,26 @@ public:
             gpu_beta.alloc(cl->dev.context, (size_t)arch.linear_value_heads * sizeof(float));
             gpu_logits.alloc(cl->dev.context, (size_t)arch.n_vocab * sizeof(float));
 
-            // Allocate in-VRAM GPU recurrent state
+            // Allocate in-VRAM GPU recurrent state and GPU KV cache
             gpu_ssm_states.resize((size_t)arch.n_layer);
             gpu_conv_states.resize((size_t)arch.n_layer);
+            gpu_k_caches.resize((size_t)arch.n_layer);
+            gpu_v_caches.resize((size_t)arch.n_layer);
+
             for (size_t l = 0; l < (size_t)arch.n_layer; l++) {
                 gpu_ssm_states[l].alloc(cl->dev.context, 16 * 128 * 128 * sizeof(float));
                 gpu_conv_states[l].alloc(cl->dev.context, 3 * total_qkv * sizeof(float));
                 cl->fill(gpu_ssm_states[l], 0.0f, 16 * 128 * 128);
                 cl->fill(gpu_conv_states[l], 0.0f, 3 * total_qkv);
+
+                bool is_full_attn = (arch.full_attention_interval > 0) &&
+                                    (((int64_t)l + 1) % arch.full_attention_interval == 0);
+                if (is_full_attn) {
+                    gpu_k_caches[l].alloc(cl->dev.context, (size_t)(max_seq_len * n_embd * sizeof(float)));
+                    gpu_v_caches[l].alloc(cl->dev.context, (size_t)(max_seq_len * n_embd * sizeof(float)));
+                    cl->fill(gpu_k_caches[l], 0.0f, max_seq_len * n_embd);
+                    cl->fill(gpu_v_caches[l], 0.0f, max_seq_len * n_embd);
+                }
             }
         }
 
@@ -370,6 +382,8 @@ public:
             for (size_t l = 0; l < gpu_ssm_states.size(); l++) {
                 if (gpu_ssm_states[l].mem) cl->fill(gpu_ssm_states[l], 0.0f, 16 * 128 * 128);
                 if (gpu_conv_states[l].mem) cl->fill(gpu_conv_states[l], 0.0f, 3 * total_qkv);
+                if (gpu_k_caches[l].mem) cl->fill(gpu_k_caches[l], 0.0f, seq_limit * arch.n_embd);
+                if (gpu_v_caches[l].mem) cl->fill(gpu_v_caches[l], 0.0f, seq_limit * arch.n_embd);
             }
         }
     }
@@ -530,9 +544,6 @@ public:
                 }
 
                 if (is_full_attn) {
-                    float *k_slice = full_attn_kv.data() + layer * 2 * seq_limit * n_embd;
-                    float *v_slice = k_slice + seq_limit * n_embd;
-
                     auto w_Q = model.tensors.find(prefix + "attn_q.weight");
                     auto w_K = model.tensors.find(prefix + "attn_k.weight");
                     auto w_V = model.tensors.find(prefix + "attn_v.weight");
@@ -551,56 +562,12 @@ public:
                         dispatch_gemv(gpu_v, gpu_hidden, prefix + "attn_v.weight", w_V->second, actual_v_dim, n_embd);
                     }
 
-                    clEnqueueReadBuffer(cl->dev.queue, gpu_q.mem, CL_FALSE, 0, (size_t)(q_size * sizeof(float)), q_buf, 0, nullptr, nullptr);
-                    clEnqueueReadBuffer(cl->dev.queue, gpu_k.mem, CL_FALSE, 0, (size_t)(kv_size * sizeof(float)), k_buf, 0, nullptr, nullptr);
-                    clEnqueueReadBuffer(cl->dev.queue, gpu_v.mem, CL_TRUE, 0, (size_t)(kv_size * sizeof(float)), v_buf, 0, nullptr, nullptr);
+                    cl->rope(gpu_q, q_size, n_head, position, 1);
+                    cl->rope(gpu_k, kv_size, n_kv_head, position, 1);
 
-                    rope_cpu(q_buf, q_size, n_head, (int)position, 1, arch.rope_freq_base);
-                    rope_cpu(k_buf, kv_size, n_kv_head, (int)position, 1, arch.rope_freq_base);
-
-                    memcpy(k_slice + position * n_embd, k_buf, kv_size * sizeof(float));
-                    memcpy(v_slice + position * n_embd, v_buf, kv_size * sizeof(float));
-
-                    int64_t S = position + 1;
-                    float inv_scale = 1.0f / sqrtf((float)head_dim);
-                    int64_t q_per_kv = n_head / n_kv_head;
-
-                    for (int64_t h = 0; h < n_head; h++) {
-                        int64_t h_kv = h / q_per_kv;
-                        for (int64_t s = 0; s < S; s++) {
-                            float sum = 0.0f;
-                            for (int64_t d = 0; d < head_dim; d++) {
-                                sum += q_buf[h * head_dim + d] * k_slice[s * n_embd + h_kv * head_dim + d];
-                            }
-                            scores[h * S + s] = sum * inv_scale;
-                        }
-                    }
-
-                    for (int64_t h = 0; h < n_head; h++) {
-                        int64_t offset = h * S;
-                        float maxv = scores[offset];
-                        for (int64_t s = 0; s < S; s++) if (scores[offset + s] > maxv) maxv = scores[offset + s];
-                        float sum = 0.0f;
-                        for (int64_t s = 0; s < S; s++) {
-                            scores[offset + s] = expf(scores[offset + s] - maxv);
-                            sum += scores[offset + s];
-                        }
-                        float inv_sum = 1.0f / sum;
-                        for (int64_t s = 0; s < S; s++) scores[offset + s] *= inv_sum;
-                    }
-
-                    memset(attn_out, 0, n_embd * sizeof(float));
-                    for (int64_t h = 0; h < n_head; h++) {
-                        int64_t h_kv = h / q_per_kv;
-                        for (int64_t s = 0; s < S; s++) {
-                            float w = scores[h * S + s];
-                            for (int64_t d = 0; d < head_dim; d++) {
-                                attn_out[h * head_dim + d] += w * v_slice[s * n_embd + h_kv * head_dim + d];
-                            }
-                        }
-                    }
-
-                    clEnqueueWriteBuffer(cl->dev.queue, gpu_attn_out.mem, CL_FALSE, 0, (size_t)(n_embd * sizeof(float)), attn_out, 0, nullptr, nullptr);
+                    // Pure GPU Causal Full Attention
+                    cl->qwen_attention_step(gpu_q, gpu_k, gpu_v, gpu_k_caches[layer], gpu_v_caches[layer],
+                                            gpu_attn_out, n_head, n_kv_head, head_dim, n_embd, position, seq_limit);
 
                     if (w_O != model.tensors.end()) {
                         dispatch_gemv(gpu_gate, gpu_attn_out, prefix + "attn_output.weight", w_O->second, n_embd, n_embd);
@@ -940,6 +907,8 @@ private:
 
     std::vector<ClBuffer> gpu_ssm_states;
     std::vector<ClBuffer> gpu_conv_states;
+    std::vector<ClBuffer> gpu_k_caches;
+    std::vector<ClBuffer> gpu_v_caches;
 };
 
 } // namespace

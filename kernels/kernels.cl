@@ -50,6 +50,35 @@ kernel void rms_norm_f32(
 }
 
 //------------------------------------------------------------------------------
+// FUSED: Residual Add + In-Place RMS Norm
+//------------------------------------------------------------------------------
+kernel void add_rms_norm_f32(
+    global float *residual,      // In/Out: residual += branch
+    global const float *branch,  // In: branch activation
+    global const float *weight,  // In: norm weight
+    global float *norm_out,      // Out: normalized activation
+    int n,
+    float eps
+) {
+    int row = get_global_id(0);
+    global float *r = residual + (size_t)row * n;
+    global const float *b = branch + (size_t)row * n;
+    global float *out = norm_out + (size_t)row * n;
+
+    float ss = 0.0f;
+    for (int i = 0; i < n; i++) {
+        float val = r[i] + b[i];
+        r[i] = val;
+        ss += val * val;
+    }
+    float s = rsqrt(ss / (float)n + eps);
+
+    for (int i = 0; i < n; i++) {
+        out[i] = r[i] * s * weight[i];
+    }
+}
+
+//------------------------------------------------------------------------------
 // Matrix Multiply (A: MxK, B: KxN, C: MxN)
 //------------------------------------------------------------------------------
 kernel void matmul_f32(
@@ -98,7 +127,7 @@ kernel void matmul_f32_nt(
 }
 
 //------------------------------------------------------------------------------
-// GEMV F32 NT
+// GEMV F32 NT (Warp-32 optimized)
 //------------------------------------------------------------------------------
 kernel void gemv_f32_nt(
     global const float *a,
@@ -107,7 +136,7 @@ kernel void gemv_f32_nt(
     int N,
     int K
 ) {
-    local float l_sum[128];
+    local float l_sum[32];
     int col = get_group_id(0);
     if (col >= N) return;
     int tid = get_local_id(0);
@@ -123,18 +152,22 @@ kernel void gemv_f32_nt(
     l_sum[tid] = sum;
     barrier(CLK_LOCAL_MEM_FENCE);
 
-    for (int s = wg_size / 2; s > 0; s >>= 1) {
-        if (tid < s) l_sum[tid] += l_sum[tid + s];
-        barrier(CLK_LOCAL_MEM_FENCE);
-    }
+    if (tid < 16) l_sum[tid] += l_sum[tid + 16];
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (tid < 8)  l_sum[tid] += l_sum[tid + 8];
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (tid < 4)  l_sum[tid] += l_sum[tid + 4];
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (tid < 2)  l_sum[tid] += l_sum[tid + 2];
+    barrier(CLK_LOCAL_MEM_FENCE);
 
     if (tid == 0) {
-        dst[col] = l_sum[0];
+        dst[col] = l_sum[0] + l_sum[1];
     }
 }
 
 //------------------------------------------------------------------------------
-// FUSED GEMV Q8_0: SIMD unrolled 128-bit memory bursts
+// FUSED GEMV Q8_0 (Warp-32 Coalesced)
 //------------------------------------------------------------------------------
 kernel void gemv_q8_0(
     global const float *a,
@@ -143,7 +176,7 @@ kernel void gemv_q8_0(
     int N,
     int K
 ) {
-    local float l_sum[128];
+    local float l_sum[32];
     int col = get_group_id(0);
     if (col >= N) return;
     int tid = get_local_id(0);
@@ -171,18 +204,22 @@ kernel void gemv_q8_0(
     l_sum[tid] = sum;
     barrier(CLK_LOCAL_MEM_FENCE);
 
-    for (int s = wg_size / 2; s > 0; s >>= 1) {
-        if (tid < s) l_sum[tid] += l_sum[tid + s];
-        barrier(CLK_LOCAL_MEM_FENCE);
-    }
+    if (tid < 16) l_sum[tid] += l_sum[tid + 16];
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (tid < 8)  l_sum[tid] += l_sum[tid + 8];
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (tid < 4)  l_sum[tid] += l_sum[tid + 4];
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (tid < 2)  l_sum[tid] += l_sum[tid + 2];
+    barrier(CLK_LOCAL_MEM_FENCE);
 
     if (tid == 0) {
-        dst[col] = l_sum[0];
+        dst[col] = l_sum[0] + l_sum[1];
     }
 }
 
 //------------------------------------------------------------------------------
-// FUSED GEMV Q4_0: SIMD unrolled with concurrent INT/FP decode
+// FUSED GEMV Q4_0 (Warp-32 Coalesced)
 //------------------------------------------------------------------------------
 kernel void gemv_q4_0(
     global const float *a,
@@ -191,7 +228,7 @@ kernel void gemv_q4_0(
     int N,
     int K
 ) {
-    local float l_sum[128];
+    local float l_sum[32];
     int col = get_group_id(0);
     if (col >= N) return;
     int tid = get_local_id(0);
@@ -225,13 +262,17 @@ kernel void gemv_q4_0(
     l_sum[tid] = sum;
     barrier(CLK_LOCAL_MEM_FENCE);
 
-    for (int s = wg_size / 2; s > 0; s >>= 1) {
-        if (tid < s) l_sum[tid] += l_sum[tid + s];
-        barrier(CLK_LOCAL_MEM_FENCE);
-    }
+    if (tid < 16) l_sum[tid] += l_sum[tid + 16];
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (tid < 8)  l_sum[tid] += l_sum[tid + 8];
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (tid < 4)  l_sum[tid] += l_sum[tid + 4];
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (tid < 2)  l_sum[tid] += l_sum[tid + 2];
+    barrier(CLK_LOCAL_MEM_FENCE);
 
     if (tid == 0) {
-        dst[col] = l_sum[0];
+        dst[col] = l_sum[0] + l_sum[1];
     }
 }
 
@@ -353,6 +394,88 @@ kernel void qwen_gated_deltanet_step(
     // Write output to delta_out
     global float *out_head = delta_out + h * key_dim;
     out_head[i] = yi;
+}
+
+//------------------------------------------------------------------------------
+// GPU Causal Full Attention for 1 Token
+// Dispatched with: Global = n_head * head_dim, Local = head_dim
+//------------------------------------------------------------------------------
+kernel void qwen_full_attention_step(
+    global const float *q_buf,        // [n_head * head_dim]
+    global const float *k_buf,        // [n_kv_head * head_dim]
+    global const float *v_buf,        // [n_kv_head * head_dim]
+    global float *k_cache,            // [max_seq * n_embd]
+    global float *v_cache,            // [max_seq * n_embd]
+    global float *attn_out,           // [n_embd]
+    int n_head,
+    int n_kv_head,
+    int head_dim,
+    int n_embd,
+    int pos,
+    int max_seq
+) {
+    local float l_scores[512];
+    local float l_dot[128];
+
+    int h = get_group_id(0);
+    int d = get_local_id(0);
+
+    if (h >= n_head || d >= head_dim) return;
+
+    int q_per_kv = n_head / n_kv_head;
+    int h_kv = h / (q_per_kv > 0 ? q_per_kv : 1);
+
+    // Save K and V to GPU cache in VRAM
+    if (h == 0 && d < n_kv_head * head_dim) {
+        k_cache[(size_t)pos * n_embd + d] = k_buf[d];
+        v_cache[(size_t)pos * n_embd + d] = v_buf[d];
+    }
+    barrier(CLK_GLOBAL_MEM_FENCE);
+
+    int S = pos + 1;
+    float inv_scale = rsqrt((float)head_dim);
+
+    // Compute scores for head h
+    global const float *q_h = q_buf + h * head_dim;
+
+    for (int s = 0; s < S && s < 512; s++) {
+        global const float *k_s = k_cache + (size_t)s * n_embd + h_kv * head_dim;
+        l_dot[d] = q_h[d] * k_s[d];
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        for (int step = head_dim / 2; step > 0; step >>= 1) {
+            if (d < step) l_dot[d] += l_dot[d + step];
+            barrier(CLK_LOCAL_MEM_FENCE);
+        }
+        if (d == 0) {
+            l_scores[s] = l_dot[0] * inv_scale;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    // Softmax over l_scores[0..S-1]
+    if (d == 0) {
+        float maxv = l_scores[0];
+        for (int s = 1; s < S && s < 512; s++) if (l_scores[s] > maxv) maxv = l_scores[s];
+        float sum = 0.0f;
+        for (int s = 0; s < S && s < 512; s++) {
+            l_scores[s] = exp(l_scores[s] - maxv);
+            sum += l_scores[s];
+        }
+        float inv_sum = 1.0f / sum;
+        for (int s = 0; s < S && s < 512; s++) l_scores[s] *= inv_sum;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    // Weighted sum of V
+    float acc = 0.0f;
+    for (int s = 0; s < S && s < 512; s++) {
+        float w = l_scores[s];
+        global const float *v_s = v_cache + (size_t)s * n_embd + h_kv * head_dim;
+        acc += w * v_s[d];
+    }
+
+    attn_out[h * head_dim + d] = acc;
 }
 
 //------------------------------------------------------------------------------

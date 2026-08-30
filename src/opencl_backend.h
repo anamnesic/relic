@@ -94,8 +94,10 @@ struct OpenClBackend {
     void gemv_q8_0(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t N, int64_t K);
     void gemv_q4_0(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t N, int64_t K);
     void swiglu(ClBuffer &dst, ClBuffer &gate, ClBuffer &up, int64_t n);
+    void add_rms_norm(ClBuffer &residual, ClBuffer &branch, ClBuffer &weight, ClBuffer &norm_out, int64_t n, float eps = 1e-6f);
     void qwen_conv1d(ClBuffer &conv_state, ClBuffer &conv_in, ClBuffer &weight, ClBuffer &conv_out, int64_t C);
     void qwen_deltanet(ClBuffer &ssm_state, ClBuffer &conv_out, ClBuffer &alpha, ClBuffer &beta, ClBuffer &delta_out, int64_t key_dim, int64_t qk_dim, int64_t linear_inner);
+    void qwen_attention_step(ClBuffer &q_buf, ClBuffer &k_buf, ClBuffer &v_buf, ClBuffer &k_cache, ClBuffer &v_cache, ClBuffer &attn_out, int64_t n_head, int64_t n_kv_head, int64_t head_dim, int64_t n_embd, int64_t pos, int64_t max_seq);
 
     // Core operations
     void rms_norm(ClBuffer &out, ClBuffer &x, ClBuffer &weight, int64_t n, int64_t rows);
