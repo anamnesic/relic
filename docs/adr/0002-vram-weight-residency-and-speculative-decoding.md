@@ -17,7 +17,7 @@ Furthermore, the target hardware comprises:
 2. **Fused Quantized GEMV OpenCL 1.2 Kernels (`gemv_q8_0`, `gemv_q4_0`)**:
    - Direct dequantization inside GPU work-item private registers during matrix-vector dot product calculation.
    - Workgroup parallel reduction using high-speed on-chip local memory (`__local float l_sum[128]`).
-   - Multi-Row 2x Register Coarsening: Each workgroup computes 2 matrix rows simultaneously, loading input activation slices into private registers once and cutting global/L1 activation cache reads in half.
+   - Multi-Row 4x Register Coarsening: Each workgroup computes 4 matrix rows simultaneously, loading input activation slices into private registers once and cutting global/L1 activation cache reads by 4x.
    - Warp-32 coalesced execution with 128-bit memory bursts for memory controller saturation on Turing architectures.
 3. **In-VRAM Recurrent Gated DeltaNet State & Conv1D (`qwen_conv1d_silu`, `qwen_gated_deltanet_step`)**:
    - Maintain recurrent state $S \in \mathbb{R}^{16 \times 128 \times 128}$ and convolution buffers directly in GPU VRAM buffers (`gpu_ssm_states`, `gpu_conv_states`).
@@ -31,8 +31,9 @@ Furthermore, the target hardware comprises:
 
 ## Consequences & Benchmarks
 - **GTX 1650 (Turing)**:
-  - Generation speed surged from **0.39 tok/s** $\to$ **5.45 tok/s** $\to$ **9.39 tok/s sustained** (**~24.1x speedup / 2.410% gain** vs baseline).
-  - Prompt processing throughput surged from **2.19 tok/s** $\to$ **7.89 tok/s**.
+  - Generation speed surged from **0.39 tok/s** $\to$ **5.45 tok/s** $\to$ **9.39 tok/s** $\to$ **12.98 tok/s sustained** (**~33.3x speedup / 3.228% gain** vs initial baseline).
+  - Generation latency dropped to **~77 ms per token**.
+  - Prompt processing throughput reached **9.91 tok/s**.
   - VRAM utilization: **2.60 GB resident** within the 4.0 GB physical VRAM limit.
   - Zero host-to-device PCIe transfer overhead during token generation.
 - **Intel UHD Graphics**:
