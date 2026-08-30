@@ -1,15 +1,23 @@
-# LLM on Legacy GPUs
+# Relic
 
-> Minimal GGUF LLM runtime for OpenCL 1.2 GPUs  
+> **LLM inference for hardware left behind.**
+>
+> Minimal GGUF LLM runtime for OpenCL 1.2 GPUs. Binary: `relic`.
 > Running modern transformers on obsolete hardware.
+
+`Relic` is part of [Anamnesic](https://github.com/anamnesic) — AI for hardware
+left behind. It makes "relíquia" (relic) GPUs come back to life for local
+inference.
 
 ---
 
 ## What is this?
 
-LLM on Legacy GPUs is an experimental inference runtime designed to run modern transformer models on extremely old GPUs using OpenCL 1.2.
+**Relic** is an experimental inference runtime designed to run modern
+transformer models on extremely old GPUs using OpenCL 1.2.
 
-The project explores how far legacy hardware can be pushed for local AI inference.
+The project explores how far legacy hardware can be pushed for local AI
+inference.
 
 Test target:
 
@@ -44,15 +52,17 @@ Test target:
 ✅ Autoregressive generation  
 ✅ SmolLM2 inference working
 
+Validated on this machine: OpenCL kernels and numeric self-tests pass on the
+NVIDIA GTX 1650 and Intel UHD Graphics. GGUF metadata from Ollama `gemma4:e2b`
+loads successfully; inference is currently limited to `llama` architecture.
+
 ---
 
 ## Example
 
 ```bash
-llm_on_legacy_gpus.exe \
-  -m smollm2-135m.gguf \
-  -p "The capital of France is" \
-  -n 5 -t 0
+relic rebuild
+pwsh scripts/relic.ps1 run -m smollm2-135m.gguf -p "The capital of France is" -n 5 -t 0
 ```
 
 Output:
@@ -188,12 +198,28 @@ cmake ..
 cmake --build . --config Release
 ```
 
+Or via the bundled script:
+
+```bash
+pwsh scripts/build.ps1
+```
+
 ---
 
 ## Usage
 
 ```bash
-llm_on_legacy_gpus.exe -m model.gguf -p "Hello"
+# OpenCL device inventory
+pwsh scripts/relic.ps1 probe
+
+# GGUF metadata/tensors
+pwsh scripts/relic.ps1 info model.gguf
+
+# Inference
+pwsh scripts/relic.ps1 run -m model.gguf -p "Hello"
+
+# JSON wrapper report around an inference run
+pwsh scripts/relic.ps1 bench -m model.gguf -p "Hello" -n 16
 ```
 
 Options:

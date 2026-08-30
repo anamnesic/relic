@@ -3,13 +3,25 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <cstring>
 #include <vector>
 
-int main() {
-    fprintf(stdout, "=== Caicos RT OpenCL 1.2 Self-Test ===\n\n");
+int main(int argc, char **argv) {
+    int platform_idx = 0;
+    int device_idx = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--platform") == 0 && i + 1 < argc) platform_idx = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--device") == 0 && i + 1 < argc) device_idx = atoi(argv[++i]);
+        else {
+            fprintf(stderr, "Usage: %s [--platform <int>] [--device <int>]\n", argv[0]);
+            return 1;
+        }
+    }
+
+    fprintf(stdout, "=== Relic OpenCL 1.2 Self-Test ===\n\n");
 
     OpenClBackend cl;
-    if (!cl.init(0, 0)) {
+    if (!cl.init(platform_idx, device_idx)) {
         fprintf(stderr, "FAIL: OpenCL init failed\n");
         return 1;
     }

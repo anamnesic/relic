@@ -1,11 +1,12 @@
 #pragma once
-#include "gguf_reader.h"
+#include "architecture.h"
 #include <vector>
 #include <string>
 #include <cstring>
 #include <cmath>
 
 struct LlamaModel {
+    ArchitectureSpec architecture;
     int64_t n_vocab = 32000;
     int64_t n_embd = 4096;
     int64_t n_mult = 256;

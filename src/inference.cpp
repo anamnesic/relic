@@ -7,6 +7,10 @@
 
 bool InferenceEngine::init(LlamaModel *m, Tokenizer *tok, OpenClBackend *backend,
                             int64_t max_seq_len) {
+    if (m->architecture.kind != ArchitectureKind::Llama) {
+        fprintf(stderr, "Architecture %s requires its dedicated decoder backend\n", m->architecture.name.c_str());
+        return false;
+    }
     model = m;
     tokenizer = tok;
     cl = backend;

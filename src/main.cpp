@@ -9,7 +9,7 @@
 #include <vector>
 
 void print_usage(const char *prog) {
-    fprintf(stdout, "Caicos RT - Minimal Inference Runtime for OpenCL 1.2\n");
+    fprintf(stdout, "Relic - Minimal Inference Runtime for OpenCL 1.2\n");
     fprintf(stdout, "Usage: %s [options] -m <model.gguf>\n", prog);
     fprintf(stdout, "Options:\n");
     fprintf(stdout, "  -m <file>         Model file (GGUF format)\n");
@@ -55,37 +55,37 @@ int main(int argc, char **argv) {
 
     // List devices mode
     if (list_devices) {
-        OpenClBackend cl;
-        cl_uint n_platforms;
-        clGetPlatformIDs(0, nullptr, &n_platforms);
-        if (n_platforms == 0) {
+        cl_uint n_platforms = 0;
+        if (clGetPlatformIDs(0, nullptr, &n_platforms) != CL_SUCCESS || n_platforms == 0) {
             fprintf(stdout, "No OpenCL platforms found\n");
             return 0;
         }
         std::vector<cl_platform_id> platforms(n_platforms);
-        clGetPlatformIDs(n_platforms, platforms.data(), nullptr);
+        if (clGetPlatformIDs(n_platforms, platforms.data(), nullptr) != CL_SUCCESS) {
+            fprintf(stderr, "Failed to enumerate OpenCL platforms\n");
+            return 1;
+        }
 
         for (cl_uint p = 0; p < n_platforms; p++) {
             char name[1024];
             clGetPlatformInfo(platforms[p], CL_PLATFORM_NAME, sizeof(name), name, nullptr);
             fprintf(stdout, "Platform %u: %s\n", p, name);
 
-            cl_uint nd;
-            clGetDeviceIDs(platforms[p], CL_DEVICE_TYPE_ALL, 0, nullptr, &nd);
-            if (nd > 0) {
+            cl_uint nd = 0;
+            if (clGetDeviceIDs(platforms[p], CL_DEVICE_TYPE_ALL, 0, nullptr, &nd) == CL_SUCCESS && nd > 0) {
                 std::vector<cl_device_id> devs(nd);
-                clGetDeviceIDs(platforms[p], CL_DEVICE_TYPE_ALL, nd, devs.data(), nullptr);
+                if (clGetDeviceIDs(platforms[p], CL_DEVICE_TYPE_ALL, nd, devs.data(), nullptr) != CL_SUCCESS) continue;
                 for (cl_uint d = 0; d < nd; d++) {
                     char dname[1024], version[128];
                     cl_device_type dtype;
-                    size_t mem;
+                    cl_ulong mem;
                     clGetDeviceInfo(devs[d], CL_DEVICE_NAME, sizeof(dname), dname, nullptr);
                     clGetDeviceInfo(devs[d], CL_DEVICE_VERSION, sizeof(version), version, nullptr);
                     clGetDeviceInfo(devs[d], CL_DEVICE_TYPE, sizeof(dtype), &dtype, nullptr);
                     clGetDeviceInfo(devs[d], CL_DEVICE_GLOBAL_MEM_SIZE, sizeof(mem), &mem, nullptr);
                     fprintf(stdout, "  Device %d: %s [%s] %zu MB %s\n",
                             d, dname, version, mem / (1024 * 1024),
-                            dtype == CL_DEVICE_TYPE_GPU ? "GPU" : "CPU");
+                            (dtype & CL_DEVICE_TYPE_GPU) ? "GPU" : "CPU");
                 }
             }
         }
@@ -138,7 +138,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    fprintf(stdout, "\n=== Caicos RT Inference ===\n");
+    fprintf(stdout, "\n=== Relic Inference ===\n");
     fprintf(stdout, "Prompt: %s\n", prompt.c_str());
     fprintf(stdout, "Generating %d tokens...\n\n", n_tokens);
 

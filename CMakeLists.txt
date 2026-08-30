@@ -6,29 +6,30 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(OpenCL REQUIRED)
 
-add_executable(caicos_rt
+add_executable(relic
     src/main.cpp
+    src/architecture.cpp
     src/model.cpp
     src/opencl_backend.cpp
     src/tokenizer.cpp
     src/inference.cpp
 )
 
-add_executable(caicos_rt_test
+add_executable(relic_test
     src/test_opencl.cpp
     src/opencl_backend.cpp
 )
-target_include_directories(caicos_rt_test PRIVATE src ${OpenCL_INCLUDE_DIRS})
-target_link_libraries(caicos_rt_test PRIVATE ${OpenCL_LIBRARIES})
-target_compile_definitions(caicos_rt_test PRIVATE CL_TARGET_OPENCL_VERSION=120)
+target_include_directories(relic_test PRIVATE src ${OpenCL_INCLUDE_DIRS})
+target_link_libraries(relic_test PRIVATE ${OpenCL_LIBRARIES})
+target_compile_definitions(relic_test PRIVATE CL_TARGET_OPENCL_VERSION=120)
 
-add_executable(dump_model
+add_executable(relic_dump_model
     src/dump_model.cpp
 )
-target_include_directories(dump_model PRIVATE src)
-target_link_libraries(dump_model PRIVATE ${OpenCL_LIBRARIES})
-target_compile_definitions(dump_model PRIVATE CL_TARGET_OPENCL_VERSION=120)
+target_include_directories(relic_dump_model PRIVATE src)
+target_link_libraries(relic_dump_model PRIVATE ${OpenCL_LIBRARIES})
+target_compile_definitions(relic_dump_model PRIVATE CL_TARGET_OPENCL_VERSION=120)
 
-target_include_directories(caicos_rt PRIVATE src ${OpenCL_INCLUDE_DIRS})
-target_link_libraries(caicos_rt PRIVATE ${OpenCL_LIBRARIES})
-target_compile_definitions(caicos_rt PRIVATE CL_TARGET_OPENCL_VERSION=120)
+target_include_directories(relic PRIVATE src ${OpenCL_INCLUDE_DIRS})
+target_link_libraries(relic PRIVATE ${OpenCL_LIBRARIES})
+target_compile_definitions(relic PRIVATE CL_TARGET_OPENCL_VERSION=120)

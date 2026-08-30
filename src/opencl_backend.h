@@ -7,20 +7,20 @@
 #include <cstring>
 
 struct ClDeviceInfo {
-    cl_platform_id platform;
-    cl_device_id device;
-    cl_context context;
-    cl_command_queue queue;
+    cl_platform_id platform = nullptr;
+    cl_device_id device = nullptr;
+    cl_context context = nullptr;
+    cl_command_queue queue = nullptr;
     std::string name;
     std::string platform_name;
-    size_t global_mem;
-    size_t max_alloc;
-    size_t max_wg_size;
-    cl_uint compute_units;
+    size_t global_mem = 0;
+    size_t max_alloc = 0;
+    size_t max_wg_size = 0;
+    cl_uint compute_units = 0;
     int opencl_c_major = 0;
     int opencl_c_minor = 0;
     bool fp16 = false;
-    cl_int alignment;
+    cl_int alignment = 0;
 };
 
 struct ClBuffer {

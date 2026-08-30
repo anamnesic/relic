@@ -9,26 +9,29 @@ bool LlamaModel::load(const char *filename) {
         return false;
     }
 
-    n_vocab = (int64_t)reader.get_metadata("llama.vocab_size",
-               (int64_t)reader.get_metadata("tokenizer.ggml.vocab_size", 32000));
-    n_embd = reader.get_metadata<int64_t>("llama.embedding_length",
-             reader.get_metadata<int64_t>("llama.d_model",
-             reader.get_metadata<int64_t>("llama.n_embd", 4096)));
+    const std::string architecture_name = reader.get_metadata<std::string>("general.architecture", "");
+    const ModelArchitecture *adapter = find_architecture(architecture_name);
+    std::string architecture_error;
+    if (!adapter || !adapter->configure(reader, architecture, architecture_error)) {
+        fprintf(stderr, "Unsupported GGUF architecture: %s%s%s\n",
+                architecture_name.empty() ? "unknown" : architecture_name.c_str(),
+                architecture_error.empty() ? "" : " (",
+                architecture_error.empty() ? "" : (architecture_error + ")").c_str());
+        return false;
+    }
+
+    n_vocab = architecture.n_vocab;
+    n_embd = architecture.n_embd;
     n_mult = reader.get_metadata<int64_t>("llama.feed_forward_length",
-             reader.get_metadata<int64_t>("llama.n_mult", 256));
-    n_head = reader.get_metadata<int64_t>("llama.attention.head_count",
-             reader.get_metadata<int64_t>("llama.n_head", 32));
-    n_head_kv = reader.get_metadata<int64_t>("llama.attention.head_count_kv",
-                reader.get_metadata<int64_t>("llama.n_head_kv", n_head));
-    n_layer = reader.get_metadata<int64_t>("llama.block_count",
-              reader.get_metadata<int64_t>("llama.n_layer", 32));
-    n_ff = reader.get_metadata<int64_t>("llama.feed_forward_length",
-           reader.get_metadata<int64_t>("llama.n_ff", 4 * n_embd));
-    norm_eps = reader.get_metadata<float>("llama.attention.layer_norm_rms_epsilon",
-               reader.get_metadata<float>("llama.norm_eps", 1e-5f));
+              reader.get_metadata<int64_t>("llama.n_mult", 256));
+    n_head = architecture.n_head;
+    n_head_kv = architecture.n_head_kv;
+    n_layer = architecture.n_layer;
+    n_ff = architecture.n_ff;
+    norm_eps = architecture.norm_eps;
     n_expert = reader.get_metadata<int64_t>("llama.expert_count", 0);
     n_expert_used = reader.get_metadata<int64_t>("llama.expert_used_count", 0);
-    rope_freq_base = reader.get_metadata<float>("llama.rope.freq_base", 10000.0f);
+    rope_freq_base = architecture.rope_freq_base;
     rope_freq_scale = reader.get_metadata<float>("llama.rope.freq_scale", 1.0f);
 
     n_embd_head_k = n_embd / n_head;

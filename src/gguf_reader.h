@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <cstring>
 #include <cassert>
+#include <limits>
 
 constexpr uint32_t GGUF_MAGIC = 0x46554747;
 constexpr uint32_t GGUF_VERSION = 3;
@@ -157,9 +158,14 @@ struct GgufReader {
     bool load(const char *filename) {
         FILE *f = fopen(filename, "rb");
         if (!f) return false;
-        fseek(f, 0, SEEK_END);
-        size_t size = ftell(f);
-        fseek(f, 0, SEEK_SET);
+        if (_fseeki64(f, 0, SEEK_END) != 0) { fclose(f); return false; }
+        __int64 file_size = _ftelli64(f);
+        if (file_size <= 0 || static_cast<uint64_t>(file_size) > std::numeric_limits<size_t>::max()) {
+            fclose(f);
+            return false;
+        }
+        size_t size = static_cast<size_t>(file_size);
+        if (_fseeki64(f, 0, SEEK_SET) != 0) { fclose(f); return false; }
         data.resize(size);
         if (fread(data.data(), 1, size, f) != size) {
             fclose(f);
@@ -168,36 +174,44 @@ struct GgufReader {
         fclose(f);
 
         size_t pos = 0;
-        auto read_u8 = [&]() -> uint8_t { return data[pos++]; };
-        auto read_i8 = [&]() -> int8_t { return (int8_t)data[pos++]; };
-        auto read_u16 = [&]() -> uint16_t { uint16_t v; memcpy(&v, &data[pos], 2); pos += 2; return v; };
-        auto read_i16 = [&]() -> int16_t { int16_t v; memcpy(&v, &data[pos], 2); pos += 2; return v; };
-        auto read_u32 = [&]() -> uint32_t { uint32_t v; memcpy(&v, &data[pos], 4); pos += 4; return v; };
-        auto read_i32 = [&]() -> int32_t { int32_t v; memcpy(&v, &data[pos], 4); pos += 4; return v; };
-        auto read_u64 = [&]() -> uint64_t { uint64_t v; memcpy(&v, &data[pos], 8); pos += 8; return v; };
-        auto read_i64 = [&]() -> int64_t { int64_t v; memcpy(&v, &data[pos], 8); pos += 8; return v; };
-        auto read_f32 = [&]() -> float { float v; memcpy(&v, &data[pos], 4); pos += 4; return v; };
-        auto read_f64 = [&]() -> double { double v; memcpy(&v, &data[pos], 8); pos += 8; return v; };
+        bool valid = true;
+        auto has_bytes = [&](size_t count) -> bool {
+            if (pos > data.size() || count > data.size() - pos) { valid = false; return false; }
+            return true;
+        };
+        auto read_u8 = [&]() -> uint8_t { return has_bytes(1) ? data[pos++] : 0; };
+        auto read_i8 = [&]() -> int8_t { return has_bytes(1) ? (int8_t)data[pos++] : 0; };
+        auto read_u16 = [&]() -> uint16_t { uint16_t v = 0; if (has_bytes(2)) { memcpy(&v, &data[pos], 2); pos += 2; } return v; };
+        auto read_i16 = [&]() -> int16_t { int16_t v = 0; if (has_bytes(2)) { memcpy(&v, &data[pos], 2); pos += 2; } return v; };
+        auto read_u32 = [&]() -> uint32_t { uint32_t v = 0; if (has_bytes(4)) { memcpy(&v, &data[pos], 4); pos += 4; } return v; };
+        auto read_i32 = [&]() -> int32_t { int32_t v = 0; if (has_bytes(4)) { memcpy(&v, &data[pos], 4); pos += 4; } return v; };
+        auto read_u64 = [&]() -> uint64_t { uint64_t v = 0; if (has_bytes(8)) { memcpy(&v, &data[pos], 8); pos += 8; } return v; };
+        auto read_i64 = [&]() -> int64_t { int64_t v = 0; if (has_bytes(8)) { memcpy(&v, &data[pos], 8); pos += 8; } return v; };
+        auto read_f32 = [&]() -> float { float v = 0; if (has_bytes(4)) { memcpy(&v, &data[pos], 4); pos += 4; } return v; };
+        auto read_f64 = [&]() -> double { double v = 0; if (has_bytes(8)) { memcpy(&v, &data[pos], 8); pos += 8; } return v; };
 
         auto read_string = [&]() -> std::string {
             uint64_t len = read_u64();
+            if (!valid || len > data.size() - pos) { valid = false; return {}; }
             std::string s((const char*)&data[pos], (size_t)len);
             pos += (size_t)len;
             return s;
         };
 
         uint32_t magic = read_u32();
-        if (magic != GGUF_MAGIC) return false;
+        if (!valid || magic != GGUF_MAGIC) return false;
 
         uint32_t version = read_u32();
         (void)version;
 
         uint64_t tensor_count = read_u64();
         uint64_t kv_count = read_u64();
+        if (!valid || tensor_count > data.size() || kv_count > data.size()) return false;
 
         for (uint64_t i = 0; i < kv_count; i++) {
             std::string key = read_string();
             GgufType val_type = (GgufType)read_i32();
+            if (!valid) return false;
 
             switch (val_type) {
                 case GgufType::UINT8:   metadata_uint32[key] = read_u8(); break;
@@ -215,22 +229,43 @@ struct GgufReader {
                 case GgufType::ARRAY: {
                     GgufType arr_type = (GgufType)read_i32();
                     uint64_t arr_n = read_u64();
+                    if (!valid || arr_n > data.size() - pos) return false;
                     for (uint64_t j = 0; j < arr_n; j++) {
                         if (arr_type == GgufType::STRING) {
                             metadata_str[key + "_" + std::to_string(j)] = read_string();
+                        } else if (arr_type == GgufType::UINT8) {
+                            (void)read_u8();
+                        } else if (arr_type == GgufType::INT8 || arr_type == GgufType::BOOL) {
+                            (void)read_i8();
+                        } else if (arr_type == GgufType::UINT16) {
+                            (void)read_u16();
+                        } else if (arr_type == GgufType::INT16) {
+                            (void)read_i16();
                         } else if (arr_type == GgufType::INT32) {
                             (void)read_i32();
+                        } else if (arr_type == GgufType::UINT32) {
+                            (void)read_u32();
                         } else if (arr_type == GgufType::FLOAT32) {
                             (void)read_f32();
+                        } else if (arr_type == GgufType::UINT64) {
+                            (void)read_u64();
+                        } else if (arr_type == GgufType::INT64) {
+                            (void)read_i64();
+                        } else if (arr_type == GgufType::FLOAT64) {
+                            (void)read_f64();
+                        } else {
+                            return false;
                         }
                     }
                     break;
                 }
                 default: break;
             }
+            if (!valid) return false;
 
             if (key == "general.alignment") {
-                alignment = metadata_uint32.at("general.alignment");
+                auto it = metadata_uint32.find("general.alignment");
+                if (it != metadata_uint32.end()) alignment = it->second;
             }
         }
 
@@ -238,6 +273,7 @@ struct GgufReader {
             GgufTensorInfo info;
             info.name = read_string();
             uint32_t n_dims = read_u32();
+            if (!valid || n_dims > 32) return false;
             info.dims.resize(n_dims);
             for (uint32_t j = 0; j < n_dims; j++) {
                 info.dims[j] = read_i64();
@@ -245,11 +281,12 @@ struct GgufReader {
             info.type = (GgmlType)read_i32();
             info.offset = read_u64();
             tensors[info.name] = info;
+            if (!valid) return false;
         }
 
         // Align to alignment boundary
         tensor_data_offset = (pos + alignment - 1) & ~(alignment - 1);
-        return true;
+        return alignment > 0 && tensor_data_offset <= data.size();
     }
 
     const void *tensor_data(const std::string &name) const {

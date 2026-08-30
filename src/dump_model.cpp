@@ -10,7 +10,7 @@ int main(int argc, char **argv) {
 
     fprintf(stdout, "=== Metadata ===\n");
     for (auto &[k, v] : reader.metadata_str)
-        fprintf(stdout, "  str %s = %s\n", k.c_str(), v.c_str());
+        if (k.rfind("tokenizer.", 0) != 0) fprintf(stdout, "  str %s = %s\n", k.c_str(), v.c_str());
     for (auto &[k, v] : reader.metadata_int)
         fprintf(stdout, "  int %s = %lld\n", k.c_str(), (long long)v);
     for (auto &[k, v] : reader.metadata_float)
