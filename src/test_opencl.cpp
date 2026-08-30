@@ -1,5 +1,7 @@
 // Self-test: verify OpenCL 1.2 init and kernel execution on Caicos
 #include "opencl_backend.h"
+#include "qwen35_state.h"
+#include "decoder.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -158,6 +160,126 @@ int main(int argc, char **argv) {
         }
     }
     fprintf(stdout, "  rms_norm result: %s\n", pass ? "PASS" : "FAIL");
+
+    // Test the architecture-independent reference implementation used by the
+    // Qwen3.5 decoder before its OpenCL adapter is enabled.
+    fprintf(stdout, "\nRunning Qwen3.5 recurrent state test...\n");
+    ArchitectureSpec qwen;
+    qwen.n_layer = 1;
+    qwen.linear_conv_kernel = 2;
+    qwen.linear_inner_size = 2;
+    qwen.linear_key_head_dim = 1;
+    qwen.linear_key_heads = 1;
+    qwen.linear_value_heads = 2;
+    Qwen35RecurrentState recurrent;
+    pass = recurrent.init(qwen);
+    float conv_input[] = {1, 2, 3, 4};
+    float conv_kernel[] = {2, 3, 2, 3, 2, 3, 2, 3};
+    float conv_output[4] = {};
+    recurrent.conv1d(0, conv_input, conv_kernel, conv_output);
+    const float first_conv[] = {3, 6, 9, 12};
+    for (int i = 0; i < 4; ++i) pass &= fabsf(conv_output[i] - first_conv[i]) < 1e-5f;
+
+    float q[] = {1, 1};
+    float k[] = {1, 1};
+    float v[] = {2, 4};
+    float decay[] = {0, 0};
+    float beta[] = {0.5f, 0.5f};
+    float delta_output[2] = {};
+    recurrent.delta_step(0, q, k, v, decay, beta, delta_output);
+    pass &= fabsf(delta_output[0] - 1.0f) < 1e-5f && fabsf(delta_output[1] - 2.0f) < 1e-5f;
+    recurrent.delta_step(0, q, k, v, decay, beta, delta_output);
+    pass &= fabsf(delta_output[0] - 1.5f) < 1e-5f && fabsf(delta_output[1] - 3.0f) < 1e-5f;
+    fprintf(stdout, "  Qwen3.5 recurrent state: %s\n", pass ? "PASS" : "FAIL");
+
+    // Test Hexagonal Architecture: Decoder Port & Qwen3.5 CPU Forward Pass
+    fprintf(stdout, "\nRunning Hexagonal Decoder Port & Qwen3.5 Forward Pass test...\n");
+    ArchitectureSpec qwen_full;
+    qwen_full.kind = ArchitectureKind::Qwen35;
+    qwen_full.name = "qwen35";
+    qwen_full.n_vocab = 8;
+    qwen_full.n_embd = 4;
+    qwen_full.n_layer = 2;
+    qwen_full.n_head = 2;
+    qwen_full.n_head_kv = 2;
+    qwen_full.n_ff = 8;
+    qwen_full.full_attention_interval = 2; // layer 0: recurrent, layer 1: full attention
+    qwen_full.linear_conv_kernel = 2;
+    qwen_full.linear_inner_size = 4;
+    qwen_full.linear_key_head_dim = 2;
+    qwen_full.linear_key_heads = 1;
+    qwen_full.linear_value_heads = 2;
+
+    auto decoder = create_decoder(qwen_full, nullptr);
+    bool decoder_pass = (decoder != nullptr);
+    if (decoder_pass) {
+        decoder_pass &= decoder->init(qwen_full, 128);
+
+        // Build mock model with identity/unit tensors
+        LlamaModel mock_model;
+        mock_model.architecture = qwen_full;
+        mock_model.n_vocab = 8;
+        mock_model.n_embd = 4;
+
+        auto make_f32_tensor = [](const std::string &name, const std::vector<int64_t> &dims, float val = 1.0f) {
+            LlamaModel::Tensor t;
+            t.name = name;
+            t.type = GgmlType::F32;
+            t.dims = dims;
+            int64_t ne = 1;
+            for (auto d : dims) ne *= d;
+            t.data.resize(ne * sizeof(float));
+            std::vector<float> values(ne, val);
+            memcpy(t.data.data(), values.data(), ne * sizeof(float));
+            return t;
+        };
+
+        // Token embedding: [n_embd, n_vocab] = [4, 8]
+        mock_model.tensors["token_embd.weight"] = make_f32_tensor("token_embd.weight", {4, 8}, 0.5f);
+        // Output norm & weight
+        mock_model.tensors["output_norm.weight"] = make_f32_tensor("output_norm.weight", {4}, 1.0f);
+        mock_model.tensors["output.weight"] = make_f32_tensor("output.weight", {4, 8}, 0.25f);
+
+        // Layer 0: Recurrent
+        mock_model.tensors["blk.0.attn_norm.weight"] = make_f32_tensor("blk.0.attn_norm.weight", {4}, 1.0f);
+        mock_model.tensors["blk.0.attn_q.weight"] = make_f32_tensor("blk.0.attn_q.weight", {4, 2}, 0.5f);
+        mock_model.tensors["blk.0.attn_k.weight"] = make_f32_tensor("blk.0.attn_k.weight", {4, 2}, 0.5f);
+        mock_model.tensors["blk.0.attn_v.weight"] = make_f32_tensor("blk.0.attn_v.weight", {4, 4}, 0.5f);
+        mock_model.tensors["blk.0.ssm_conv1d.weight"] = make_f32_tensor("blk.0.ssm_conv1d.weight", {2, 8}, 1.0f);
+        mock_model.tensors["blk.0.ssm_alpha.weight"] = make_f32_tensor("blk.0.ssm_alpha.weight", {2}, 0.0f);
+        mock_model.tensors["blk.0.ssm_beta.weight"] = make_f32_tensor("blk.0.ssm_beta.weight", {2}, 0.5f);
+        mock_model.tensors["blk.0.attn_output.weight"] = make_f32_tensor("blk.0.attn_output.weight", {4, 4}, 0.25f);
+        mock_model.tensors["blk.0.ffn_norm.weight"] = make_f32_tensor("blk.0.ffn_norm.weight", {4}, 1.0f);
+        mock_model.tensors["blk.0.ffn_gate.weight"] = make_f32_tensor("blk.0.ffn_gate.weight", {4, 8}, 0.2f);
+        mock_model.tensors["blk.0.ffn_up.weight"] = make_f32_tensor("blk.0.ffn_up.weight", {4, 8}, 0.2f);
+        mock_model.tensors["blk.0.ffn_down.weight"] = make_f32_tensor("blk.0.ffn_down.weight", {8, 4}, 0.2f);
+
+        // Layer 1: Full Attention
+        mock_model.tensors["blk.1.attn_norm.weight"] = make_f32_tensor("blk.1.attn_norm.weight", {4}, 1.0f);
+        mock_model.tensors["blk.1.attn_q.weight"] = make_f32_tensor("blk.1.attn_q.weight", {4, 4}, 0.5f);
+        mock_model.tensors["blk.1.attn_k.weight"] = make_f32_tensor("blk.1.attn_k.weight", {4, 4}, 0.5f);
+        mock_model.tensors["blk.1.attn_v.weight"] = make_f32_tensor("blk.1.attn_v.weight", {4, 4}, 0.5f);
+        mock_model.tensors["blk.1.attn_output.weight"] = make_f32_tensor("blk.1.attn_output.weight", {4, 4}, 0.25f);
+        mock_model.tensors["blk.1.ffn_norm.weight"] = make_f32_tensor("blk.1.ffn_norm.weight", {4}, 1.0f);
+        mock_model.tensors["blk.1.ffn_gate.weight"] = make_f32_tensor("blk.1.ffn_gate.weight", {4, 8}, 0.2f);
+        mock_model.tensors["blk.1.ffn_up.weight"] = make_f32_tensor("blk.1.ffn_up.weight", {4, 8}, 0.2f);
+        mock_model.tensors["blk.1.ffn_down.weight"] = make_f32_tensor("blk.1.ffn_down.weight", {8, 4}, 0.2f);
+
+        std::vector<float> logits(8, 0.0f);
+        int res0 = decoder->forward(mock_model, 0, 0, logits.data());
+        decoder_pass &= (res0 == 0);
+        for (int i = 0; i < 8; ++i) {
+            decoder_pass &= (!std::isnan(logits[i]) && !std::isinf(logits[i]));
+        }
+
+        int res1 = decoder->forward(mock_model, 1, 1, logits.data());
+        decoder_pass &= (res1 == 0);
+        for (int i = 0; i < 8; ++i) {
+            decoder_pass &= (!std::isnan(logits[i]) && !std::isinf(logits[i]));
+        }
+    }
+    pass &= decoder_pass;
+    fprintf(stdout, "  Qwen3.5 decoder port & forward pass: %s\n", decoder_pass ? "PASS" : "FAIL");
 
     // Device info summary
     fprintf(stdout, "\n=== Device Summary ===\n");

@@ -9,6 +9,8 @@ find_package(OpenCL REQUIRED)
 add_executable(relic
     src/main.cpp
     src/architecture.cpp
+    src/qwen35_state.cpp
+    src/decoder.cpp
     src/model.cpp
     src/opencl_backend.cpp
     src/tokenizer.cpp
@@ -17,7 +19,11 @@ add_executable(relic
 
 add_executable(relic_test
     src/test_opencl.cpp
+    src/architecture.cpp
     src/opencl_backend.cpp
+    src/qwen35_state.cpp
+    src/decoder.cpp
+    src/model.cpp
 )
 target_include_directories(relic_test PRIVATE src ${OpenCL_INCLUDE_DIRS})
 target_link_libraries(relic_test PRIVATE ${OpenCL_LIBRARIES})

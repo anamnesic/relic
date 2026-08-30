@@ -25,6 +25,7 @@ struct ArchitectureSpec {
     // Qwen3.5's three recurrent Gated DeltaNet layers per full-attention layer.
     int64_t full_attention_interval = 0;
     int64_t linear_conv_kernel = 0;
+    int64_t linear_inner_size = 0;
     int64_t linear_key_head_dim = 0;
     int64_t linear_value_head_dim = 0;
     int64_t linear_key_heads = 0;

@@ -52,17 +52,19 @@ public:
         spec.rope_freq_base = reader.get_metadata<float>("qwen35.rope.freq_base", 10000000.0f);
         spec.full_attention_interval = reader.get_metadata<int64_t>("qwen35.full_attention_interval", 4);
         spec.linear_conv_kernel = reader.get_metadata<int64_t>("qwen35.ssm.conv_kernel", 0);
+        spec.linear_inner_size = reader.get_metadata<int64_t>("qwen35.ssm.inner_size", 0);
         spec.linear_key_head_dim = reader.get_metadata<int64_t>("qwen35.ssm.state_size", 0);
         spec.linear_value_head_dim = spec.linear_key_head_dim;
         spec.linear_key_heads = reader.get_metadata<int64_t>("qwen35.ssm.group_count", 0);
         spec.linear_value_heads = reader.get_metadata<int64_t>("qwen35.ssm.time_step_rank", 0);
         if (spec.n_vocab <= 0 || spec.n_embd <= 0 || spec.n_layer <= 0 || spec.n_head <= 0 ||
-            spec.n_head_kv <= 0 || spec.n_ff <= 0 || spec.linear_conv_kernel <= 0 ||
+             spec.n_head_kv <= 0 || spec.n_ff <= 0 || spec.linear_conv_kernel <= 0 || spec.linear_inner_size <= 0 ||
             spec.linear_key_head_dim <= 0 || spec.linear_key_heads <= 0 || spec.linear_value_heads <= 0) {
             error = "incomplete qwen35 GGUF metadata";
             return false;
         }
-        if (spec.n_embd % spec.n_head != 0 || spec.n_head % spec.n_head_kv != 0) {
+        if (spec.n_embd % spec.n_head != 0 || spec.n_head % spec.n_head_kv != 0 ||
+            spec.linear_inner_size % spec.linear_value_heads != 0) {
             error = "invalid qwen35 attention dimensions";
             return false;
         }
