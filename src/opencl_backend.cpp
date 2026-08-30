@@ -46,6 +46,19 @@ bool OpenClBackend::init(int platform_idx, int device_idx) {
     std::vector<cl_platform_id> platforms(n_platforms);
     clGetPlatformIDs(n_platforms, platforms.data(), nullptr);
 
+    if (platform_idx < 0) {
+        // Auto-detect dedicated GPU platform (e.g. NVIDIA CUDA)
+        for (cl_uint p = 0; p < n_platforms; p++) {
+            char pbuf[512];
+            clGetPlatformInfo(platforms[p], CL_PLATFORM_NAME, sizeof(pbuf), pbuf, nullptr);
+            if (strstr(pbuf, "NVIDIA") || strstr(pbuf, "CUDA") || strstr(pbuf, "AMD")) {
+                platform_idx = (int)p;
+                break;
+            }
+        }
+        if (platform_idx < 0) platform_idx = 0;
+    }
+
     if ((int)n_platforms <= platform_idx) {
         fprintf(stderr, "Platform index %d out of range (%u platforms)\n", platform_idx, n_platforms);
         return false;
@@ -391,7 +404,8 @@ void OpenClBackend::gemv_q8_0(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t N
     clSetKernelArg(knl.kernel, 4, sizeof(cl_int), &k);
 
     size_t local = 32;
-    size_t global = (size_t)N * local;
+    size_t n_groups = ((size_t)N + 1) / 2;
+    size_t global = n_groups * local;
     CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr), "gemv_q8_0");
 }
 
@@ -409,7 +423,8 @@ void OpenClBackend::gemv_q4_0(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t N
     clSetKernelArg(knl.kernel, 4, sizeof(cl_int), &k);
 
     size_t local = 32;
-    size_t global = (size_t)N * local;
+    size_t n_groups = ((size_t)N + 1) / 2;
+    size_t global = n_groups * local;
     CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr), "gemv_q4_0");
 }
 

@@ -32,7 +32,7 @@ int main(int argc, char **argv) {
     int n_tokens = 256;
     float temperature = 0.8f;
     int top_k = 40;
-    int platform_idx = 0;
+    int platform_idx = -1;
     int device_idx = 0;
     bool list_devices = false;
     bool cpu_only = false;

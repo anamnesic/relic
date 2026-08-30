@@ -103,7 +103,7 @@ kernel void matmul_f32(
 }
 
 //------------------------------------------------------------------------------
-// Matrix Multiply NT (A: MxK, B: NxK, C: MxN) - B is transposed in memory
+// Matrix Multiply NT (A: MxK, B: NxK, C: MxN)
 //------------------------------------------------------------------------------
 kernel void matmul_f32_nt(
     global const float *a,
@@ -167,7 +167,7 @@ kernel void gemv_f32_nt(
 }
 
 //------------------------------------------------------------------------------
-// FUSED GEMV Q8_0 (Warp-32 Coalesced)
+// MULTI-ROW 2x GEMV Q8_0: Calculates 2 rows per workgroup with activation reuse!
 //------------------------------------------------------------------------------
 kernel void gemv_q8_0(
     global const float *a,
@@ -176,50 +176,73 @@ kernel void gemv_q8_0(
     int N,
     int K
 ) {
-    local float l_sum[32];
-    int col = get_group_id(0);
-    if (col >= N) return;
+    local float l_sum0[32];
+    local float l_sum1[32];
+
+    int row0 = get_group_id(0) * 2;
+    int row1 = row0 + 1;
     int tid = get_local_id(0);
     int wg_size = get_local_size(0);
 
     int n_blocks = K / 32;
-    global const uchar *row_ptr = b + (size_t)col * (size_t)(n_blocks * 34);
+    global const uchar *row_ptr0 = b + (size_t)row0 * (size_t)(n_blocks * 34);
+    global const uchar *row_ptr1 = (row1 < N) ? (b + (size_t)row1 * (size_t)(n_blocks * 34)) : row_ptr0;
 
-    float sum = 0.0f;
+    float sum0 = 0.0f;
+    float sum1 = 0.0f;
+
     for (int blk = tid; blk < n_blocks; blk += wg_size) {
-        global const uchar *b_blk = row_ptr + (size_t)blk * 34;
-        ushort d_bits = (ushort)b_blk[0] | ((ushort)b_blk[1] << 8);
-        float d = fp16_to_fp32(d_bits);
-        global const char *qs = (global const char *)(b_blk + 2);
         global const float *a_blk = a + blk * 32;
 
+        global const uchar *b_blk0 = row_ptr0 + (size_t)blk * 34;
+        ushort d0_bits = (ushort)b_blk0[0] | ((ushort)b_blk0[1] << 8);
+        float d0 = fp16_to_fp32(d0_bits);
+        global const char *qs0 = (global const char *)(b_blk0 + 2);
+
+        global const uchar *b_blk1 = row_ptr1 + (size_t)blk * 34;
+        ushort d1_bits = (ushort)b_blk1[0] | ((ushort)b_blk1[1] << 8);
+        float d1 = fp16_to_fp32(d1_bits);
+        global const char *qs1 = (global const char *)(b_blk1 + 2);
+
         for (int i = 0; i < 32; i += 4) {
-            sum += a_blk[i + 0] * ((float)qs[i + 0] * d)
-                 + a_blk[i + 1] * ((float)qs[i + 1] * d)
-                 + a_blk[i + 2] * ((float)qs[i + 2] * d)
-                 + a_blk[i + 3] * ((float)qs[i + 3] * d);
+            float act0 = a_blk[i + 0];
+            float act1 = a_blk[i + 1];
+            float act2 = a_blk[i + 2];
+            float act3 = a_blk[i + 3];
+
+            sum0 += act0 * ((float)qs0[i + 0] * d0)
+                  + act1 * ((float)qs0[i + 1] * d0)
+                  + act2 * ((float)qs0[i + 2] * d0)
+                  + act3 * ((float)qs0[i + 3] * d0);
+
+            sum1 += act0 * ((float)qs1[i + 0] * d1)
+                  + act1 * ((float)qs1[i + 1] * d1)
+                  + act2 * ((float)qs1[i + 2] * d1)
+                  + act3 * ((float)qs1[i + 3] * d1);
         }
     }
 
-    l_sum[tid] = sum;
+    l_sum0[tid] = sum0;
+    l_sum1[tid] = sum1;
     barrier(CLK_LOCAL_MEM_FENCE);
 
-    if (tid < 16) l_sum[tid] += l_sum[tid + 16];
+    if (tid < 16) { l_sum0[tid] += l_sum0[tid + 16]; l_sum1[tid] += l_sum1[tid + 16]; }
     barrier(CLK_LOCAL_MEM_FENCE);
-    if (tid < 8)  l_sum[tid] += l_sum[tid + 8];
+    if (tid < 8)  { l_sum0[tid] += l_sum0[tid + 8];  l_sum1[tid] += l_sum1[tid + 8]; }
     barrier(CLK_LOCAL_MEM_FENCE);
-    if (tid < 4)  l_sum[tid] += l_sum[tid + 4];
+    if (tid < 4)  { l_sum0[tid] += l_sum0[tid + 4];  l_sum1[tid] += l_sum1[tid + 4]; }
     barrier(CLK_LOCAL_MEM_FENCE);
-    if (tid < 2)  l_sum[tid] += l_sum[tid + 2];
+    if (tid < 2)  { l_sum0[tid] += l_sum0[tid + 2];  l_sum1[tid] += l_sum1[tid + 2]; }
     barrier(CLK_LOCAL_MEM_FENCE);
 
     if (tid == 0) {
-        dst[col] = l_sum[0] + l_sum[1];
+        dst[row0] = l_sum0[0] + l_sum0[1];
+        if (row1 < N) dst[row1] = l_sum1[0] + l_sum1[1];
     }
 }
 
 //------------------------------------------------------------------------------
-// FUSED GEMV Q4_0 (Warp-32 Coalesced)
+// MULTI-ROW 2x GEMV Q4_0: Calculates 2 rows per workgroup with activation reuse!
 //------------------------------------------------------------------------------
 kernel void gemv_q4_0(
     global const float *a,
@@ -228,51 +251,72 @@ kernel void gemv_q4_0(
     int N,
     int K
 ) {
-    local float l_sum[32];
-    int col = get_group_id(0);
-    if (col >= N) return;
+    local float l_sum0[32];
+    local float l_sum1[32];
+
+    int row0 = get_group_id(0) * 2;
+    int row1 = row0 + 1;
     int tid = get_local_id(0);
     int wg_size = get_local_size(0);
 
     int n_blocks = K / 32;
-    global const uchar *row_ptr = b + (size_t)col * (size_t)(n_blocks * 18);
+    global const uchar *row_ptr0 = b + (size_t)row0 * (size_t)(n_blocks * 18);
+    global const uchar *row_ptr1 = (row1 < N) ? (b + (size_t)row1 * (size_t)(n_blocks * 18)) : row_ptr0;
 
-    float sum = 0.0f;
+    float sum0 = 0.0f;
+    float sum1 = 0.0f;
+
     for (int blk = tid; blk < n_blocks; blk += wg_size) {
-        global const uchar *b_blk = row_ptr + (size_t)blk * 18;
-        ushort d_bits = (ushort)b_blk[0] | ((ushort)b_blk[1] << 8);
-        float d = fp16_to_fp32(d_bits);
-        global const uchar *qs = b_blk + 2;
         global const float *a_blk = a + blk * 32;
 
+        global const uchar *b_blk0 = row_ptr0 + (size_t)blk * 18;
+        ushort d0_bits = (ushort)b_blk0[0] | ((ushort)b_blk0[1] << 8);
+        float d0 = fp16_to_fp32(d0_bits);
+        global const uchar *qs0 = b_blk0 + 2;
+
+        global const uchar *b_blk1 = row_ptr1 + (size_t)blk * 18;
+        ushort d1_bits = (ushort)b_blk1[0] | ((ushort)b_blk1[1] << 8);
+        float d1 = fp16_to_fp32(d1_bits);
+        global const uchar *qs1 = b_blk1 + 2;
+
         for (int i = 0; i < 16; i += 2) {
-            uchar b0 = qs[i];
-            uchar b1 = qs[i + 1];
+            float act0 = a_blk[i + 0];
+            float act0_hi = a_blk[i + 16];
+            float act1 = a_blk[i + 1];
+            float act1_hi = a_blk[i + 17];
 
-            float v00 = (float)((int)(b0 & 0x0F) - 8);
-            float v01 = (float)((int)(b0 >> 4) - 8);
-            float v10 = (float)((int)(b1 & 0x0F) - 8);
-            float v11 = (float)((int)(b1 >> 4) - 8);
+            uchar q0_0 = qs0[i];
+            uchar q0_1 = qs0[i + 1];
+            sum0 += act0    * ((float)((int)(q0_0 & 0x0F) - 8) * d0)
+                  + act0_hi * ((float)((int)(q0_0 >> 4)   - 8) * d0)
+                  + act1    * ((float)((int)(q0_1 & 0x0F) - 8) * d0)
+                  + act1_hi * ((float)((int)(q0_1 >> 4)   - 8) * d0);
 
-            sum += a_blk[i + 0] * (v00 * d) + a_blk[i + 16] * (v01 * d)
-                 + a_blk[i + 1] * (v10 * d) + a_blk[i + 17] * (v11 * d);
+            uchar q1_0 = qs1[i];
+            uchar q1_1 = qs1[i + 1];
+            sum1 += act0    * ((float)((int)(q1_0 & 0x0F) - 8) * d1)
+                  + act0_hi * ((float)((int)(q1_0 >> 4)   - 8) * d1)
+                  + act1    * ((float)((int)(q1_1 & 0x0F) - 8) * d1)
+                  + act1_hi * ((float)((int)(q1_1 >> 4)   - 8) * d1);
         }
     }
 
-    l_sum[tid] = sum;
+    l_sum0[tid] = sum0;
+    l_sum1[tid] = sum1;
     barrier(CLK_LOCAL_MEM_FENCE);
 
-    if (tid < 16) l_sum[tid] += l_sum[tid + 16];
+    if (tid < 16) { l_sum0[tid] += l_sum0[tid + 16]; l_sum1[tid] += l_sum1[tid + 16]; }
     barrier(CLK_LOCAL_MEM_FENCE);
-    if (tid < 8)  l_sum[tid] += l_sum[tid + 8];
+    if (tid < 8)  { l_sum0[tid] += l_sum0[tid + 8];  l_sum1[tid] += l_sum1[tid + 8]; }
     barrier(CLK_LOCAL_MEM_FENCE);
-    if (tid < 4)  l_sum[tid] += l_sum[tid + 4];
+    if (tid < 4)  { l_sum0[tid] += l_sum0[tid + 4];  l_sum1[tid] += l_sum1[tid + 4]; }
     barrier(CLK_LOCAL_MEM_FENCE);
-    if (tid < 2)  l_sum[tid] += l_sum[tid + 2];
+    if (tid < 2)  { l_sum0[tid] += l_sum0[tid + 2];  l_sum1[tid] += l_sum1[tid + 2]; }
     barrier(CLK_LOCAL_MEM_FENCE);
 
     if (tid == 0) {
-        dst[col] = l_sum[0] + l_sum[1];
+        dst[row0] = l_sum0[0] + l_sum0[1];
+        if (row1 < N) dst[row1] = l_sum1[0] + l_sum1[1];
     }
 }
 

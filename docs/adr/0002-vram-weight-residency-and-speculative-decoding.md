@@ -17,21 +17,24 @@ Furthermore, the target hardware comprises:
 2. **Fused Quantized GEMV OpenCL 1.2 Kernels (`gemv_q8_0`, `gemv_q4_0`)**:
    - Direct dequantization inside GPU work-item private registers during matrix-vector dot product calculation.
    - Workgroup parallel reduction using high-speed on-chip local memory (`__local float l_sum[128]`).
-   - 4x loop unrolling with 128-bit memory bursts for memory controller saturation on Turing architectures.
+   - Multi-Row 2x Register Coarsening: Each workgroup computes 2 matrix rows simultaneously, loading input activation slices into private registers once and cutting global/L1 activation cache reads in half.
+   - Warp-32 coalesced execution with 128-bit memory bursts for memory controller saturation on Turing architectures.
 3. **In-VRAM Recurrent Gated DeltaNet State & Conv1D (`qwen_conv1d_silu`, `qwen_gated_deltanet_step`)**:
    - Maintain recurrent state $S \in \mathbb{R}^{16 \times 128 \times 128}$ and convolution buffers directly in GPU VRAM buffers (`gpu_ssm_states`, `gpu_conv_states`).
    - Eliminate all 36 blocking CPU-GPU synchronization stalls per token across the 18 recurrent DeltaNet layers.
-4. **Fused SwiGLU Activation Kernel (`swiglu_f32`)**:
+4. **Pure GPU Causal Full Attention & In-VRAM KV Cache (`qwen_full_attention_step`)**:
+   - Execute RoPE and Causal Multi-Head Attention directly on GPU for the 6 Full Attention layers, keeping the KV cache in VRAM.
+5. **Fused SwiGLU Activation Kernel (`swiglu_f32`)**:
    - Element-wise fusion of SiLU and multiplication to eliminate redundant VRAM round-trips in FFN layers.
-5. **Prompt-Lookup Speculative Decoding (Zero-VRAM Speculation)**:
+6. **Prompt-Lookup Speculative Decoding (Zero-VRAM Speculation)**:
    - Dynamic $N$-gram pattern matching against context tokens to propose draft candidates without loading secondary draft models or consuming additional VRAM.
 
 ## Consequences & Benchmarks
 - **GTX 1650 (Turing)**:
-  - Generation speed reached **5.35 tok/s sustained** (**~14x speedup / 1.370% gain** vs original 0.39 tok/s).
+  - Generation speed surged from **0.39 tok/s** $\to$ **5.45 tok/s** $\to$ **9.39 tok/s sustained** (**~24.1x speedup / 2.410% gain** vs baseline).
+  - Prompt processing throughput surged from **2.19 tok/s** $\to$ **7.89 tok/s**.
   - VRAM utilization: **2.60 GB resident** within the 4.0 GB physical VRAM limit.
-  - Zero CPU synchronization stalls during DeltaNet recurrence.
+  - Zero host-to-device PCIe transfer overhead during token generation.
 - **Intel UHD Graphics**:
-  - Prompt speed increased from **0.13 tok/s** (22.7s) to **0.32 tok/s** (9.3s) (**> 2.4x speedup**).
-  - Generation speed reached **1.51 tok/s** (**~8x speedup** vs original 0.19 tok/s).
-- Zero host-to-device PCIe transfer overhead during token generation.
+  - Prompt speed increased from **0.13 tok/s** (22.7s) to **0.44 tok/s** (6.7s) (**> 3.4x speedup**).
+  - Generation speed increased from **0.19 tok/s** $\to$ **1.51 tok/s** $\to$ **2.25 tok/s** (**~11.8x speedup**).
