@@ -235,16 +235,16 @@ int main(int argc, char **argv)
             (double)vram_budget / (1024.0 * 1024.0),
             (double)plan.vram_required_bytes / (1024.0 * 1024.0),
             plan.num_layers_fully_offloaded, (long long)model.n_layer);
-    fprintf(stdout, "[Adaptive Planner] Footprint Reduction: %.1f%% | Traffic Reduction: %.1f%% | Est. DMA Overlap: %.1f%%\n",
-            plan.vram_footprint_reduction_pct, plan.memory_traffic_reduction_pct, plan.estimated_dma_overlap_efficiency);
+    fprintf(stdout, "[Adaptive Planner] Footprint Reduction: %.1f%% | PCIe Traffic Reduction: %.1f%% | Est. DMA Overlap: %.1f%%\n",
+            plan.vram_footprint_reduction_pct, plan.pcie_traffic_reduction_pct, plan.estimated_dma_overlap_efficiency);
 
-    // Initialize inference engine
+    // Initialize inference engine with ExecutionPlan
     InferenceEngine engine;
     engine.enable_speculative = speculative;
     engine.speculative_ngram = speculative_ngram;
     engine.speculative_max_draft = speculative_draft_max;
 
-    if (!engine.init(&model, &tokenizer, cl_ok ? &cl : nullptr, max_seq_len))
+    if (!engine.init(&model, &tokenizer, cl_ok ? &cl : nullptr, max_seq_len, &plan))
     {
         fprintf(stderr, "Failed to initialize inference engine\n");
         return 1;

@@ -9,10 +9,14 @@
 #include <string>
 #include <vector>
 
-struct InferenceEngine {
+struct ExecutionPlan;
+
+struct InferenceEngine
+{
     LlamaModel *model = nullptr;
     Tokenizer *tokenizer = nullptr;
     OpenClBackend *cl = nullptr;
+    const ExecutionPlan *plan = nullptr;
     std::unique_ptr<ArchitectureDecoder> decoder;
     int64_t max_seq_len = 2048;
     int64_t n_past = 0;
@@ -22,7 +26,7 @@ struct InferenceEngine {
     int speculative_max_draft = 3;
 
     bool init(LlamaModel *m, Tokenizer *tok, OpenClBackend *backend,
-              int64_t max_seq_len = 2048);
+              int64_t max_seq_len = 2048, const ExecutionPlan *plan = nullptr);
     void free_buffers();
 
     // Forward pass for one token

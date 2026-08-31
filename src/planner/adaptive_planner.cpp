@@ -3,6 +3,31 @@
 #include <cstdio>
 #include <cmath>
 
+GgmlType AdaptivePlanner::choose_representation(const std::string &tensor_name, const LlamaModel::Tensor &tensor, BackendDeviceType device)
+{
+    // Norms and biases always stay F32 in execution for numerical precision
+    if (tensor_name.find("norm") != std::string::npos || tensor_name.find("bias") != std::string::npos)
+    {
+        return GgmlType::F32;
+    }
+    // Embeddings
+    if (tensor_name.find("token_embd") != std::string::npos || tensor_name.find("tok_embeddings") != std::string::npos)
+    {
+        return tensor.type;
+    }
+    // On GPU: Q8_0 weights get repacked on-the-fly to Q4_0
+    if (device == BackendDeviceType::NVIDIA_GPU || device == BackendDeviceType::AMD_GPU || device == BackendDeviceType::INTEL_IGPU)
+    {
+        if (tensor.type == GgmlType::Q8_0)
+        {
+            return GgmlType::Q4_0;
+        }
+        return tensor.type;
+    }
+    // On CPU
+    return tensor.type;
+}
+
 size_t AdaptivePlanner::get_tensor_vram_size(const LlamaModel::Tensor &tensor, BackendDeviceType target_device, GgmlType target_type)
 {
     int64_t ne = 1;
@@ -12,7 +37,7 @@ size_t AdaptivePlanner::get_tensor_vram_size(const LlamaModel::Tensor &tensor, B
         return tensor.data.size();
 
     // If repacking on-the-fly to Q4_0 on GPU
-    if (target_type == GgmlType::Q4_0 || (tensor.type == GgmlType::Q8_0 && target_device != BackendDeviceType::CPU_AVX2))
+    if (target_type == GgmlType::Q4_0)
     {
         int64_t n_blocks = (ne + 31) / 32;
         return (size_t)n_blocks * 18;
@@ -88,7 +113,8 @@ ExecutionPlan AdaptivePlanner::generate_plan(
         size_t raw_bytes = tensor.data.size();
         total_uncompressed_bytes += raw_bytes;
 
-        size_t vram_bytes = get_tensor_vram_size(tensor, primary_device, GgmlType::Q4_0);
+        GgmlType rep = choose_representation(kv.first, tensor, primary_device);
+        size_t vram_bytes = get_tensor_vram_size(tensor, primary_device, rep);
         int64_t ne = 1;
         for (auto d : tensor.dims)
             ne *= d;
@@ -105,7 +131,7 @@ ExecutionPlan AdaptivePlanner::generate_plan(
         TensorCostEstimate est;
         est.tensor_name = kv.first;
         est.device = primary_device;
-        est.representation = (tensor.type == GgmlType::Q8_0) ? GgmlType::Q4_0 : tensor.type;
+        est.representation = rep;
         est.memory_bytes = vram_bytes;
         est.dma_transfer_time_ms = t_dma_ms;
         est.compute_time_ms = t_gpu_comp_ms;
@@ -194,16 +220,15 @@ ExecutionPlan AdaptivePlanner::generate_plan(
     // 5. Data Movement & Footprint Reduction Metrics
     if (total_uncompressed_bytes > 0)
     {
-        // e.g. 2602.77 MB -> 1676.71 MB = 35.58% (35.6%) reduction
         plan.vram_footprint_reduction_pct = ((double)total_uncompressed_bytes - (double)plan.vram_required_bytes) / (double)total_uncompressed_bytes * 100.0;
         if (plan.vram_footprint_reduction_pct < 0.0)
             plan.vram_footprint_reduction_pct = 0.0;
     }
 
-    // Memory traffic reduction compares resident execution vs streaming all weights every token
+    // PCIe / Host<->Device Traffic reduction compares resident execution vs streaming all weights every token
     double streaming_traffic_bytes = (double)total_uncompressed_bytes;
     double actual_traffic_bytes = (double)plan.host_ram_required_bytes;
-    plan.memory_traffic_reduction_pct = (streaming_traffic_bytes > 0) ? ((streaming_traffic_bytes - actual_traffic_bytes) / streaming_traffic_bytes * 100.0) : 0.0;
+    plan.pcie_traffic_reduction_pct = (streaming_traffic_bytes > 0) ? ((streaming_traffic_bytes - actual_traffic_bytes) / streaming_traffic_bytes * 100.0) : 0.0;
 
     // Overlap efficiency: compute(N) + transfer(N+1)
     if (total_transfer_time_ms > 0.0)

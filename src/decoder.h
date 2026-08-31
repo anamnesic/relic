@@ -7,6 +7,7 @@
 #include <vector>
 
 class OpenClBackend;
+struct ExecutionPlan;
 
 // Hexagonal Port: ArchitectureDecoder
 // Abstract port defining the execution contract for any model architecture decoder.
@@ -15,8 +16,8 @@ class ArchitectureDecoder
 public:
     virtual ~ArchitectureDecoder() = default;
 
-    // Initializes internal buffers, caches, and recurrent states.
-    virtual bool init(const ArchitectureSpec &spec, int64_t max_seq_len) = 0;
+    // Initializes internal buffers, caches, and recurrent states according to the execution plan.
+    virtual bool init(const ArchitectureSpec &spec, int64_t max_seq_len, const ExecutionPlan *plan = nullptr) = 0;
 
     // Resets sequence position, KV caches, and recurrent history.
     virtual void reset() = 0;

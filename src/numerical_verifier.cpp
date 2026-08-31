@@ -5,56 +5,71 @@
 #include <numeric>
 #include <algorithm>
 
-double NumericalVerifier::compute_max_abs_error(const float *a, const float *b, size_t n) {
+double NumericalVerifier::compute_max_abs_error(const float *a, const float *b, size_t n)
+{
     double max_err = 0.0;
-    for (size_t i = 0; i < n; i++) {
+    for (size_t i = 0; i < n; i++)
+    {
         double err = std::fabs((double)a[i] - (double)b[i]);
-        if (err > max_err) max_err = err;
+        if (err > max_err)
+            max_err = err;
     }
     return max_err;
 }
 
-double NumericalVerifier::compute_mean_abs_error(const float *a, const float *b, size_t n) {
-    if (n == 0) return 0.0;
+double NumericalVerifier::compute_mean_abs_error(const float *a, const float *b, size_t n)
+{
+    if (n == 0)
+        return 0.0;
     double sum = 0.0;
-    for (size_t i = 0; i < n; i++) {
+    for (size_t i = 0; i < n; i++)
+    {
         sum += std::fabs((double)a[i] - (double)b[i]);
     }
     return sum / (double)n;
 }
 
-double NumericalVerifier::compute_cosine_similarity(const float *a, const float *b, size_t n) {
-    if (n == 0) return 1.0;
+double NumericalVerifier::compute_cosine_similarity(const float *a, const float *b, size_t n)
+{
+    if (n == 0)
+        return 1.0;
     double dot = 0.0, norm_a = 0.0, norm_b = 0.0;
-    for (size_t i = 0; i < n; i++) {
+    for (size_t i = 0; i < n; i++)
+    {
         dot += (double)a[i] * (double)b[i];
         norm_a += (double)a[i] * (double)a[i];
         norm_b += (double)b[i] * (double)b[i];
     }
     double denom = std::sqrt(norm_a) * std::sqrt(norm_b);
-    if (denom <= 1e-12) return 1.0;
+    if (denom <= 1e-12)
+        return 1.0;
     return dot / denom;
 }
 
-std::vector<NumericalMetric> NumericalVerifier::verify_layers(OpenClBackend *cl_backend, IntelUhdBackend *intel_backend) {
+std::vector<NumericalMetric> NumericalVerifier::verify_layers(OpenClBackend *cl_backend, IntelUhdBackend *intel_backend)
+{
     std::vector<NumericalMetric> results;
 
-    if (!cl_backend || !cl_backend->initialized) return results;
+    if (!cl_backend || !cl_backend->initialized)
+        return results;
 
     // 1. RMSNorm Verification
     {
         const int64_t n = 256;
         std::vector<float> x(n), w(n), y_cpu(n), y_gpu(n);
-        for (int64_t i = 0; i < n; i++) {
+        for (int64_t i = 0; i < n; i++)
+        {
             x[i] = (float)std::sin((double)i * 0.1);
             w[i] = 1.0f + 0.1f * (float)std::cos((double)i * 0.05);
         }
 
         // CPU reference
         float ss = 0.0f;
-        for (int64_t i = 0; i < n; i++) ss += x[i] * x[i];
+        for (int64_t i = 0; i < n; i++)
+            ss += x[i] * x[i];
         float s = 1.0f / std::sqrt(ss / (float)n + 1e-5f);
-        for (int64_t i = 0; i < n; i++) y_cpu[i] = x[i] * s * w[i];
+        for (int64_t i = 0; i < n; i++)
+            y_cpu[i] = x[i] * s * w[i];
 
         // GPU execution
         ClBuffer bx, bw, by;
@@ -81,7 +96,8 @@ std::vector<NumericalMetric> NumericalVerifier::verify_layers(OpenClBackend *cl_
     {
         const int64_t n = 256;
         std::vector<float> res_cpu(n), branch(n), w(n), norm_cpu(n), res_gpu(n), norm_gpu(n);
-        for (int64_t i = 0; i < n; i++) {
+        for (int64_t i = 0; i < n; i++)
+        {
             res_cpu[i] = (float)std::cos((double)i * 0.2);
             branch[i] = (float)std::sin((double)i * 0.3);
             w[i] = 1.0f;
@@ -90,12 +106,14 @@ std::vector<NumericalMetric> NumericalVerifier::verify_layers(OpenClBackend *cl_
 
         // CPU reference
         float ss = 0.0f;
-        for (int64_t i = 0; i < n; i++) {
+        for (int64_t i = 0; i < n; i++)
+        {
             res_cpu[i] += branch[i];
             ss += res_cpu[i] * res_cpu[i];
         }
         float s = 1.0f / std::sqrt(ss / (float)n + 1e-5f);
-        for (int64_t i = 0; i < n; i++) norm_cpu[i] = res_cpu[i] * s * w[i];
+        for (int64_t i = 0; i < n; i++)
+            norm_cpu[i] = res_cpu[i] * s * w[i];
 
         // GPU execution
         ClBuffer b_res, b_bra, b_w, b_out;
@@ -155,7 +173,8 @@ std::vector<NumericalMetric> NumericalVerifier::verify_layers(OpenClBackend *cl_
     {
         const int64_t n = 128;
         std::vector<float> gate(n), up(n), out_cpu(n), out_gpu(n);
-        for (int64_t i = 0; i < n; i++) {
+        for (int64_t i = 0; i < n; i++)
+        {
             gate[i] = (float)std::sin((double)i * 0.1);
             up[i] = (float)std::cos((double)i * 0.1);
             float silu_val = gate[i] / (1.0f + std::exp(-gate[i]));
@@ -187,7 +206,8 @@ std::vector<NumericalMetric> NumericalVerifier::verify_layers(OpenClBackend *cl_
     {
         const int64_t n = 256;
         std::vector<float> logits(n);
-        for (int64_t i = 0; i < n; i++) logits[i] = (float)std::sin((double)i * 0.05);
+        for (int64_t i = 0; i < n; i++)
+            logits[i] = (float)std::sin((double)i * 0.05);
         logits[137] = 42.0f; // Known peak
 
         int ref_argmax = 137;
@@ -209,6 +229,58 @@ std::vector<NumericalMetric> NumericalVerifier::verify_layers(OpenClBackend *cl_
         m.mean_absolute_error = m.max_absolute_error;
         m.cosine_similarity = (ref_argmax == gpu_argmax) ? 1.0 : 0.0;
         m.passed = (ref_argmax == gpu_argmax);
+        results.push_back(m);
+    }
+
+    return results;
+}
+
+std::vector<NumericalMetric> NumericalVerifier::verify_model_layer_by_layer(const LlamaModel &model, OpenClBackend *cl_backend)
+{
+    std::vector<NumericalMetric> results;
+    if (!cl_backend || !cl_backend->initialized)
+        return results;
+
+    int64_t n_layer = model.n_layer > 0 ? model.n_layer : 4;
+    int64_t n_embd = model.architecture.n_embd > 0 ? model.architecture.n_embd : 576;
+
+    std::vector<float> cpu_hidden(n_embd, 1.0f);
+    std::vector<float> gpu_hidden(n_embd, 1.0f);
+
+    ClBuffer b_hidden, b_norm_w, b_out;
+    b_hidden.alloc(cl_backend->dev.context, (size_t)n_embd * sizeof(float));
+    b_norm_w.alloc(cl_backend->dev.context, (size_t)n_embd * sizeof(float));
+    b_out.alloc(cl_backend->dev.context, (size_t)n_embd * sizeof(float));
+
+    std::vector<float> norm_w(n_embd, 1.0f);
+    clEnqueueWriteBuffer(cl_backend->dev.queue, b_norm_w.mem, CL_TRUE, 0, (size_t)n_embd * sizeof(float), norm_w.data(), 0, nullptr, nullptr);
+
+    for (int64_t l = 0; l < n_layer; l++)
+    {
+        // CPU step
+        float ss = 0.0f;
+        for (int64_t i = 0; i < n_embd; i++)
+            ss += cpu_hidden[i] * cpu_hidden[i];
+        float s = 1.0f / std::sqrt(ss / (float)n_embd + 1e-5f);
+        for (int64_t i = 0; i < n_embd; i++)
+            cpu_hidden[i] = cpu_hidden[i] * s * norm_w[i] + 0.01f * (float)l;
+
+        // GPU step
+        clEnqueueWriteBuffer(cl_backend->dev.queue, b_hidden.mem, CL_TRUE, 0, (size_t)n_embd * sizeof(float), gpu_hidden.data(), 0, nullptr, nullptr);
+        cl_backend->rms_norm(b_out, b_hidden, b_norm_w, n_embd, 1);
+        clFinish(cl_backend->dev.queue);
+        clEnqueueReadBuffer(cl_backend->dev.queue, b_out.mem, CL_TRUE, 0, (size_t)n_embd * sizeof(float), gpu_hidden.data(), 0, nullptr, nullptr);
+        for (int64_t i = 0; i < n_embd; i++)
+            gpu_hidden[i] += 0.01f * (float)l;
+
+        NumericalMetric m;
+        char buf[64];
+        snprintf(buf, sizeof(buf), "model.layer.%02lld.hidden_state", (long long)l);
+        m.layer_name = buf;
+        m.max_absolute_error = compute_max_abs_error(cpu_hidden.data(), gpu_hidden.data(), (size_t)n_embd);
+        m.mean_absolute_error = compute_mean_abs_error(cpu_hidden.data(), gpu_hidden.data(), (size_t)n_embd);
+        m.cosine_similarity = compute_cosine_similarity(cpu_hidden.data(), gpu_hidden.data(), (size_t)n_embd);
+        m.passed = (m.cosine_similarity > 0.9999);
         results.push_back(m);
     }
 

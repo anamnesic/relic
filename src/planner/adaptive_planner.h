@@ -36,7 +36,7 @@ struct ExecutionPlan
     size_t host_ram_required_bytes = 0;
     size_t total_model_uncompressed_bytes = 0;
     double vram_footprint_reduction_pct = 0.0;
-    double memory_traffic_reduction_pct = 0.0;
+    double pcie_traffic_reduction_pct = 0.0;
     double estimated_dma_overlap_efficiency = 0.0;
     double total_data_movement_cost_ms = 0.0;
     int num_layers_fully_offloaded = 0;
@@ -50,6 +50,7 @@ struct ExecutionPlan
 class AdaptivePlanner
 {
 public:
+    static GgmlType choose_representation(const std::string &tensor_name, const LlamaModel::Tensor &tensor, BackendDeviceType device);
     static size_t get_tensor_vram_size(const LlamaModel::Tensor &tensor, BackendDeviceType target_device, GgmlType target_type);
 
     static ExecutionPlan generate_plan(

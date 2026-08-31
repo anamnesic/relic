@@ -7,13 +7,14 @@
 #include <random>
 
 bool InferenceEngine::init(LlamaModel *m, Tokenizer *tok, OpenClBackend *backend,
-                           int64_t max_seq_limit)
+                           int64_t max_seq_limit, const ExecutionPlan *exec_plan)
 {
     if (!m)
         return false;
     model = m;
     tokenizer = tok;
     cl = backend;
+    plan = exec_plan;
     max_seq_len = max_seq_limit;
     n_past = 0;
 
@@ -25,7 +26,7 @@ bool InferenceEngine::init(LlamaModel *m, Tokenizer *tok, OpenClBackend *backend
         return false;
     }
 
-    if (!decoder->init(model->architecture, max_seq_len))
+    if (!decoder->init(model->architecture, max_seq_len, plan))
     {
         fprintf(stderr, "Failed to initialize decoder for architecture: %s\n",
                 model->architecture.name.c_str());
@@ -231,33 +232,42 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
             break;
         }
 
-        // Speculative decoding verification loop
+        // Batched speculative verification
         if (enable_speculative && generated_count < max_tokens)
         {
             std::vector<int> drafts = find_prompt_lookup_draft(all_tokens, speculative_ngram, speculative_max_draft);
-            for (int draft_tok : drafts)
+            if (!drafts.empty())
             {
-                if (generated_count >= max_tokens)
-                    break;
-                int target_pred = sample_token(logits);
-                if (target_pred == draft_tok)
+                size_t num_draft = drafts.size();
+                std::vector<float> batched_logits(num_draft * (size_t)model->n_vocab);
+                if (decoder->forward_batch(*model, drafts, n_past, batched_logits.data()) == 0)
                 {
-                    // Speculative draft accepted!
-                    accepted_spec_tokens++;
-                    if (draft_tok == tokenizer->eos_id)
-                        break;
-                    std::string draft_piece = tokenizer->decode({draft_tok});
-                    output += draft_piece;
-                    fprintf(stdout, "%s", draft_piece.c_str());
-                    fflush(stdout);
-                    all_tokens.push_back(draft_tok);
-                    generated_count++;
-                    if (forward(draft_tok, logits.data()) != 0)
-                        break;
-                }
-                else
-                {
-                    break;
+                    for (size_t d = 0; d < num_draft; d++)
+                    {
+                        if (generated_count >= max_tokens)
+                            break;
+                        float *curr_logits_ptr = batched_logits.data() + d * (size_t)model->n_vocab;
+                        std::vector<float> curr_logits(curr_logits_ptr, curr_logits_ptr + model->n_vocab);
+                        int target_pred = sample_token(curr_logits);
+                        if (target_pred == drafts[d])
+                        {
+                            accepted_spec_tokens++;
+                            n_past++;
+                            std::string draft_piece = tokenizer->decode({drafts[d]});
+                            output += draft_piece;
+                            fprintf(stdout, "%s", draft_piece.c_str());
+                            fflush(stdout);
+                            all_tokens.push_back(drafts[d]);
+                            generated_count++;
+                            logits = curr_logits;
+                            if (drafts[d] == tokenizer->eos_id)
+                                break;
+                        }
+                        else
+                        {
+                            break;
+                        }
+                    }
                 }
             }
         }

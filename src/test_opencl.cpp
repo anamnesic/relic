@@ -324,8 +324,8 @@ int main(int argc, char **argv)
 
     ExecutionPlan plan = AdaptivePlanner::generate_plan(plan_mock_model, prof, 1024 * 1024 * 1024); // 1GB VRAM budget
     bool plan_pass = (!plan.tensor_placements.empty() && plan.vram_required_bytes > 0);
-    fprintf(stdout, "  AdaptivePlanner plan: %s (VRAM Footprint: %.1f%% red, Traffic: %.1f%% red, DMA Overlap: %.1f%%)\n",
-            plan_pass ? "PASS" : "FAIL", plan.vram_footprint_reduction_pct, plan.memory_traffic_reduction_pct, plan.estimated_dma_overlap_efficiency);
+    fprintf(stdout, "  AdaptivePlanner plan: %s (VRAM Footprint: %.1f%% red, PCIe Traffic: %.1f%% red, DMA Overlap: %.1f%%)\n",
+            plan_pass ? "PASS" : "FAIL", plan.vram_footprint_reduction_pct, plan.pcie_traffic_reduction_pct, plan.estimated_dma_overlap_efficiency);
     pass &= plan_pass;
 
     // Phase 2 MemoryEngine & Pinned Host Pool Tests
@@ -394,6 +394,16 @@ int main(int argc, char **argv)
     std::vector<NumericalMetric> metrics = NumericalVerifier::verify_layers(&cl, intel_init ? &intel_be : nullptr);
     bool num_pass = true;
     for (const auto &m : metrics)
+    {
+        fprintf(stdout, "  [%s] MaxAbsErr: %.2e | MeanAbsErr: %.2e | CosSim: %.6f -> %s\n",
+                m.layer_name.c_str(), m.max_absolute_error, m.mean_absolute_error, m.cosine_similarity,
+                m.passed ? "PASS" : "FAIL");
+        num_pass &= m.passed;
+    }
+
+    fprintf(stdout, "\nRunning End-to-End Model Layer-by-Layer Verification...\n");
+    std::vector<NumericalMetric> model_metrics = NumericalVerifier::verify_model_layer_by_layer(plan_mock_model, &cl);
+    for (const auto &m : model_metrics)
     {
         fprintf(stdout, "  [%s] MaxAbsErr: %.2e | MeanAbsErr: %.2e | CosSim: %.6f -> %s\n",
                 m.layer_name.c_str(), m.max_absolute_error, m.mean_absolute_error, m.cosine_similarity,
