@@ -16,6 +16,9 @@ add_executable(relic
     src/tokenizer.cpp
     src/inference.cpp
     src/planner/hardware_profile.cpp
+    src/planner/adaptive_planner.cpp
+    src/memory/memory_engine.cpp
+    src/kv/kv_manager.cpp
 )
 
 add_executable(relic_test
@@ -25,6 +28,8 @@ add_executable(relic_test
     src/qwen35_state.cpp
     src/decoder.cpp
     src/model.cpp
+    src/planner/hardware_profile.cpp
+    src/planner/adaptive_planner.cpp
 )
 target_include_directories(relic_test PRIVATE src ${OpenCL_INCLUDE_DIRS})
 target_link_libraries(relic_test PRIVATE ${OpenCL_LIBRARIES})
