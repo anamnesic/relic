@@ -75,13 +75,15 @@ struct ClMemoryTracker {
 struct ClBuffer {
     cl_mem mem = nullptr;
     size_t size = 0;
+    bool is_owner = true;
 
     ClBuffer() = default;
     ~ClBuffer() { release(); }
 
-    ClBuffer(ClBuffer &&other) noexcept : mem(other.mem), size(other.size) {
+    ClBuffer(ClBuffer &&other) noexcept : mem(other.mem), size(other.size), is_owner(other.is_owner) {
         other.mem = nullptr;
         other.size = 0;
+        other.is_owner = true;
     }
 
     ClBuffer &operator=(ClBuffer &&other) noexcept {
@@ -89,14 +91,24 @@ struct ClBuffer {
             release();
             mem = other.mem;
             size = other.size;
+            is_owner = other.is_owner;
             other.mem = nullptr;
             other.size = 0;
+            other.is_owner = true;
         }
         return *this;
     }
 
     ClBuffer(const ClBuffer &) = delete;
     ClBuffer &operator=(const ClBuffer &) = delete;
+
+    static ClBuffer borrow(cl_mem m, size_t sz) {
+        ClBuffer buf;
+        buf.mem = m;
+        buf.size = sz;
+        buf.is_owner = false;
+        return buf;
+    }
 
     bool alloc(cl_context ctx, size_t bytes, cl_mem_flags flags = CL_MEM_READ_WRITE) {
         release();
@@ -108,16 +120,20 @@ struct ClBuffer {
             return false;
         }
         size = bytes;
+        is_owner = true;
         ClMemoryTracker::record_alloc(bytes);
         return true;
     }
 
     void release() {
         if (mem) {
-            ClMemoryTracker::record_free(size);
-            clReleaseMemObject(mem);
+            if (is_owner) {
+                ClMemoryTracker::record_free(size);
+                clReleaseMemObject(mem);
+            }
             mem = nullptr;
             size = 0;
+            is_owner = true;
         }
     }
 };

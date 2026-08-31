@@ -701,22 +701,48 @@ namespace
             {
                 int slot = (int)(layer_idx % 2);
                 size_t raw_bytes = t.data.size();
-                prefetcher->prefetch_async(pin_it->second, raw_bytes, slot);
-                prefetcher->wait_ready(slot);
-                cl_mem staging_mem = prefetcher->get_staging_mem(slot);
-                if (staging_mem)
+                bool overlap_enabled = plan_ ? plan_->enable_dma_overlap : true;
+
+                if (overlap_enabled)
                 {
-                    ClBuffer staging_buf;
-                    staging_buf.mem = staging_mem;
-                    if (t.type == GgmlType::Q4_0)
+                    // Pipelined Asynchronous DMA stream
+                    prefetcher->prefetch_async(pin_it->second, raw_bytes, slot);
+                    prefetcher->wait_ready(slot);
+                    cl_mem staging_mem = prefetcher->get_staging_mem(slot);
+                    if (staging_mem)
                     {
-                        cl->gemv_q4_0(dst, in, staging_buf, N, K);
-                        return;
+                        ClBuffer staging_buf = ClBuffer::borrow(staging_mem, raw_bytes);
+                        if (t.type == GgmlType::Q4_0)
+                        {
+                            cl->gemv_q4_0(dst, in, staging_buf, N, K);
+                            return;
+                        }
+                        else if (t.type == GgmlType::Q8_0)
+                        {
+                            cl->gemv_q8_0(dst, in, staging_buf, N, K);
+                            return;
+                        }
                     }
-                    else if (t.type == GgmlType::Q8_0)
+                }
+                else
+                {
+                    // Blocking Synchronous Transfer (Overlap OFF)
+                    cl_mem staging_mem = prefetcher->get_staging_mem(slot);
+                    if (staging_mem)
                     {
-                        cl->gemv_q8_0(dst, in, staging_buf, N, K);
-                        return;
+                        clEnqueueWriteBuffer(cl->dev.queue, staging_mem, CL_TRUE, 0, raw_bytes, pin_it->second, 0, nullptr, nullptr);
+                        clFinish(cl->dev.queue);
+                        ClBuffer staging_buf = ClBuffer::borrow(staging_mem, raw_bytes);
+                        if (t.type == GgmlType::Q4_0)
+                        {
+                            cl->gemv_q4_0(dst, in, staging_buf, N, K);
+                            return;
+                        }
+                        else if (t.type == GgmlType::Q8_0)
+                        {
+                            cl->gemv_q8_0(dst, in, staging_buf, N, K);
+                            return;
+                        }
                     }
                 }
             }
