@@ -3,6 +3,7 @@
 #include "opencl_backend.h"
 #include "tokenizer.h"
 #include "inference.h"
+#include "planner/hardware_profile.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -35,6 +36,7 @@ int main(int argc, char **argv) {
     int platform_idx = -1;
     int device_idx = 0;
     bool list_devices = false;
+    bool run_profile = false;
     bool cpu_only = false;
     bool speculative = false;
     int speculative_ngram = 3;
@@ -48,6 +50,7 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "-t") == 0 && i + 1 < argc) temperature = (float)atof(argv[++i]);
         else if (strcmp(argv[i], "-k") == 0 && i + 1 < argc) top_k = atoi(argv[++i]);
         else if (strcmp(argv[i], "--list-devices") == 0) list_devices = true;
+        else if (strcmp(argv[i], "--profile") == 0) run_profile = true;
         else if (strcmp(argv[i], "--platform") == 0 && i + 1 < argc) platform_idx = atoi(argv[++i]);
         else if (strcmp(argv[i], "--device") == 0 && i + 1 < argc) device_idx = atoi(argv[++i]);
         else if (strcmp(argv[i], "--cpu") == 0) cpu_only = true;
@@ -59,6 +62,28 @@ int main(int argc, char **argv) {
             print_usage(argv[0]);
             return 0;
         }
+    }
+
+    if (run_profile) {
+        fprintf(stdout, "=== Relic Hardware Profiler ===\n");
+        HardwareProfile prof = HardwareProfile::probe_system();
+        fprintf(stdout, "CPU: %s (%d cores)\n", prof.cpu_brand.c_str(), prof.cpu_cores);
+        fprintf(stdout, "RAM: %.2f GB available (%.2f GB total)\n",
+                (double)prof.host_ram_available_bytes / (1024.0 * 1024.0 * 1024.0),
+                (double)prof.host_ram_total_bytes / (1024.0 * 1024.0 * 1024.0));
+        fprintf(stdout, "\nDetected Accelerators:\n");
+        for (const auto &d : prof.devices) {
+            fprintf(stdout, "  * %s\n", d.device_name.c_str());
+            fprintf(stdout, "    - Memory: %.2f MB (Max Single Alloc: %.2f MB)\n",
+                    (double)d.total_memory_bytes / (1024.0 * 1024.0),
+                    (double)d.max_alloc_bytes / (1024.0 * 1024.0));
+            fprintf(stdout, "    - Compute Units: %d\n", d.compute_units);
+            fprintf(stdout, "    - Est. Memory Bandwidth: %.1f GB/s\n", d.memory_bandwidth_gbs);
+            fprintf(stdout, "    - Est. DMA PCIe Bandwidth: %.1f GB/s\n\n", d.dma_transfer_bandwidth_gbs);
+        }
+        prof.save_to_file("devices.json");
+        fprintf(stdout, "Hardware profile saved to devices.json\n");
+        return 0;
     }
 
     // List devices mode

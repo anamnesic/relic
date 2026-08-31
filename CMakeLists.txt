@@ -15,6 +15,7 @@ add_executable(relic
     src/opencl_backend.cpp
     src/tokenizer.cpp
     src/inference.cpp
+    src/planner/hardware_profile.cpp
 )
 
 add_executable(relic_test
