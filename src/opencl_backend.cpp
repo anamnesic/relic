@@ -322,7 +322,7 @@ void OpenClBackend::add(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t n) {
     cl_int nn = (cl_int)n;
     clSetKernelArg(knl.kernel, 3, sizeof(cl_int), &nn);
 
-    size_t global = (size_t)n;
+    size_t global = ((size_t)n + 3) / 4;
     CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, nullptr, 0, nullptr, nullptr), "add");
 }
 
@@ -338,7 +338,7 @@ void OpenClBackend::mul(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t n) {
     cl_int nn = (cl_int)n;
     clSetKernelArg(knl.kernel, 3, sizeof(cl_int), &nn);
 
-    size_t global = (size_t)n;
+    size_t global = ((size_t)n + 3) / 4;
     CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, nullptr, 0, nullptr, nullptr), "mul");
 }
 
@@ -353,7 +353,7 @@ void OpenClBackend::copy(ClBuffer &dst, ClBuffer &src, int64_t n) {
     cl_int nn = (cl_int)n;
     clSetKernelArg(knl.kernel, 2, sizeof(cl_int), &nn);
 
-    size_t global = (size_t)n;
+    size_t global = ((size_t)n + 3) / 4;
     CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, nullptr, 0, nullptr, nullptr), "copy");
 }
 
@@ -440,7 +440,7 @@ void OpenClBackend::swiglu(ClBuffer &dst, ClBuffer &gate, ClBuffer &up, int64_t 
     cl_int count = (cl_int)n;
     clSetKernelArg(knl.kernel, 3, sizeof(cl_int), &count);
 
-    size_t global = (size_t)n;
+    size_t global = ((size_t)n + 3) / 4;
     CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, nullptr, 0, nullptr, nullptr), "swiglu_f32");
 }
 

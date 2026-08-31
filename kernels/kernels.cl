@@ -25,7 +25,7 @@ inline float fp16_to_fp32(ushort h) {
 }
 
 //------------------------------------------------------------------------------
-// RMS Norm
+// Vectorized RMS Norm (128-bit SIMD)
 //------------------------------------------------------------------------------
 kernel void rms_norm_f32(
     global float *out,
@@ -38,19 +38,24 @@ kernel void rms_norm_f32(
     global const float *rx = x + (size_t)row * n;
     global float *rout = out + (size_t)row * n;
 
-    float ss = 0.0f;
-    for (int i = 0; i < n; i++) {
-        ss += rx[i] * rx[i];
+    float4 ss4 = (float4)(0.0f);
+    int n4 = n / 4;
+    for (int i = 0; i < n4; i++) {
+        float4 v = vload4(i, rx);
+        ss4 += v * v;
     }
-    ss = rsqrt(ss / (float)n + eps);
+    float ss = ss4.x + ss4.y + ss4.z + ss4.w;
+    float s = rsqrt(ss / (float)n + eps);
 
-    for (int i = 0; i < n; i++) {
-        rout[i] = rx[i] * ss * weight[i];
+    for (int i = 0; i < n4; i++) {
+        float4 v = vload4(i, rx);
+        float4 w = vload4(i, weight);
+        vstore4(v * s * w, i, rout);
     }
 }
 
 //------------------------------------------------------------------------------
-// FUSED: Residual Add + In-Place RMS Norm
+// FUSED: Residual Add + In-Place RMS Norm (128-bit SIMD)
 //------------------------------------------------------------------------------
 kernel void add_rms_norm_f32(
     global float *residual,      // In/Out: residual += branch
@@ -65,16 +70,20 @@ kernel void add_rms_norm_f32(
     global const float *b = branch + (size_t)row * n;
     global float *out = norm_out + (size_t)row * n;
 
-    float ss = 0.0f;
-    for (int i = 0; i < n; i++) {
-        float val = r[i] + b[i];
-        r[i] = val;
-        ss += val * val;
+    float4 ss4 = (float4)(0.0f);
+    int n4 = n / 4;
+    for (int i = 0; i < n4; i++) {
+        float4 r_val = vload4(i, r) + vload4(i, b);
+        vstore4(r_val, i, r);
+        ss4 += r_val * r_val;
     }
+    float ss = ss4.x + ss4.y + ss4.z + ss4.w;
     float s = rsqrt(ss / (float)n + eps);
 
-    for (int i = 0; i < n; i++) {
-        out[i] = r[i] * s * weight[i];
+    for (int i = 0; i < n4; i++) {
+        float4 r_val = vload4(i, r);
+        float4 w = vload4(i, weight);
+        vstore4(r_val * s * w, i, out);
     }
 }
 
@@ -167,7 +176,7 @@ kernel void gemv_f32_nt(
 }
 
 //------------------------------------------------------------------------------
-// MULTI-ROW 4x GEMV Q8_0: Computes 4 rows per workgroup with activation reuse!
+// MULTI-ROW 4x GEMV Q8_0: 128-bit Vectorized with dot(float4, float4)
 //------------------------------------------------------------------------------
 kernel void gemv_q8_0(
     global const float *a,
@@ -215,23 +224,18 @@ kernel void gemv_q8_0(
         float d3 = fp16_to_fp32((ushort)b_blk3[0] | ((ushort)b_blk3[1] << 8));
         global const char *qs3 = (global const char *)(b_blk3 + 2);
 
-        for (int i = 0; i < 32; i += 4) {
-            float act0 = a_blk[i + 0];
-            float act1 = a_blk[i + 1];
-            float act2 = a_blk[i + 2];
-            float act3 = a_blk[i + 3];
+        for (int i = 0; i < 8; i++) {
+            float4 a_v = vload4(i, a_blk);
 
-            sum0 += act0 * ((float)qs0[i + 0] * d0) + act1 * ((float)qs0[i + 1] * d0)
-                  + act2 * ((float)qs0[i + 2] * d0) + act3 * ((float)qs0[i + 3] * d0);
+            char4 q0 = vload4(i, qs0);
+            char4 q1 = vload4(i, qs1);
+            char4 q2 = vload4(i, qs2);
+            char4 q3 = vload4(i, qs3);
 
-            sum1 += act0 * ((float)qs1[i + 0] * d1) + act1 * ((float)qs1[i + 1] * d1)
-                  + act2 * ((float)qs1[i + 2] * d1) + act3 * ((float)qs1[i + 3] * d1);
-
-            sum2 += act0 * ((float)qs2[i + 0] * d2) + act1 * ((float)qs2[i + 1] * d2)
-                  + act2 * ((float)qs2[i + 2] * d2) + act3 * ((float)qs2[i + 3] * d2);
-
-            sum3 += act0 * ((float)qs3[i + 0] * d3) + act1 * ((float)qs3[i + 1] * d3)
-                  + act2 * ((float)qs3[i + 2] * d3) + act3 * ((float)qs3[i + 3] * d3);
+            sum0 += dot(a_v, convert_float4(q0) * d0);
+            sum1 += dot(a_v, convert_float4(q1) * d1);
+            sum2 += dot(a_v, convert_float4(q2) * d2);
+            sum3 += dot(a_v, convert_float4(q3) * d3);
         }
     }
 
@@ -268,7 +272,7 @@ kernel void gemv_q8_0(
 }
 
 //------------------------------------------------------------------------------
-// MULTI-ROW 4x GEMV Q4_0: Computes 4 rows per workgroup with activation reuse!
+// MULTI-ROW 4x GEMV Q4_0: 128-bit Vectorized with dot(float4, float4)
 //------------------------------------------------------------------------------
 kernel void gemv_q4_0(
     global const float *a,
@@ -316,35 +320,31 @@ kernel void gemv_q4_0(
         float d3 = fp16_to_fp32((ushort)b_blk3[0] | ((ushort)b_blk3[1] << 8));
         global const uchar *qs3 = b_blk3 + 2;
 
-        for (int i = 0; i < 16; i += 2) {
-            float act0 = a_blk[i + 0];
-            float act0_hi = a_blk[i + 16];
-            float act1 = a_blk[i + 1];
-            float act1_hi = a_blk[i + 17];
+        for (int i = 0; i < 4; i++) {
+            float4 a_lo = vload4(i, a_blk);
+            float4 a_hi = vload4(i + 4, a_blk);
 
-            uchar q0_0 = qs0[i]; uchar q0_1 = qs0[i + 1];
-            sum0 += act0    * ((float)((int)(q0_0 & 0x0F) - 8) * d0)
-                  + act0_hi * ((float)((int)(q0_0 >> 4)   - 8) * d0)
-                  + act1    * ((float)((int)(q0_1 & 0x0F) - 8) * d0)
-                  + act1_hi * ((float)((int)(q0_1 >> 4)   - 8) * d0);
+            uchar4 qb0 = vload4(i, qs0);
+            uchar4 qb1 = vload4(i, qs1);
+            uchar4 qb2 = vload4(i, qs2);
+            uchar4 qb3 = vload4(i, qs3);
 
-            uchar q1_0 = qs1[i]; uchar q1_1 = qs1[i + 1];
-            sum1 += act0    * ((float)((int)(q1_0 & 0x0F) - 8) * d1)
-                  + act0_hi * ((float)((int)(q1_0 >> 4)   - 8) * d1)
-                  + act1    * ((float)((int)(q1_1 & 0x0F) - 8) * d1)
-                  + act1_hi * ((float)((int)(q1_1 >> 4)   - 8) * d1);
+            float4 v0_lo = (convert_float4(qb0 & (uchar4)0x0F) - (float4)8.0f) * d0;
+            float4 v0_hi = (convert_float4(qb0 >> (uchar4)4)   - (float4)8.0f) * d0;
 
-            uchar q2_0 = qs2[i]; uchar q2_1 = qs2[i + 1];
-            sum2 += act0    * ((float)((int)(q2_0 & 0x0F) - 8) * d2)
-                  + act0_hi * ((float)((int)(q2_0 >> 4)   - 8) * d2)
-                  + act1    * ((float)((int)(q2_1 & 0x0F) - 8) * d2)
-                  + act1_hi * ((float)((int)(q2_1 >> 4)   - 8) * d2);
+            float4 v1_lo = (convert_float4(qb1 & (uchar4)0x0F) - (float4)8.0f) * d1;
+            float4 v1_hi = (convert_float4(qb1 >> (uchar4)4)   - (float4)8.0f) * d1;
 
-            uchar q3_0 = qs3[i]; uchar q3_1 = qs3[i + 1];
-            sum3 += act0    * ((float)((int)(q3_0 & 0x0F) - 8) * d3)
-                  + act0_hi * ((float)((int)(q3_0 >> 4)   - 8) * d3)
-                  + act1    * ((float)((int)(q3_1 & 0x0F) - 8) * d3)
-                  + act1_hi * ((float)((int)(q3_1 >> 4)   - 8) * d3);
+            float4 v2_lo = (convert_float4(qb2 & (uchar4)0x0F) - (float4)8.0f) * d2;
+            float4 v2_hi = (convert_float4(qb2 >> (uchar4)4)   - (float4)8.0f) * d2;
+
+            float4 v3_lo = (convert_float4(qb3 & (uchar4)0x0F) - (float4)8.0f) * d3;
+            float4 v3_hi = (convert_float4(qb3 >> (uchar4)4)   - (float4)8.0f) * d3;
+
+            sum0 += dot(a_lo, v0_lo) + dot(a_hi, v0_hi);
+            sum1 += dot(a_lo, v1_lo) + dot(a_hi, v1_hi);
+            sum2 += dot(a_lo, v2_lo) + dot(a_hi, v2_hi);
+            sum3 += dot(a_lo, v3_lo) + dot(a_hi, v3_hi);
         }
     }
 
@@ -381,7 +381,7 @@ kernel void gemv_q4_0(
 }
 
 //------------------------------------------------------------------------------
-// Fused SwiGLU: dst[i] = silu(gate[i]) * up[i]
+// Fused SwiGLU (128-bit SIMD Vectorized): dst[i] = silu(gate[i]) * up[i]
 //------------------------------------------------------------------------------
 kernel void swiglu_f32(
     global float *out,
@@ -390,10 +390,13 @@ kernel void swiglu_f32(
     int n
 ) {
     int i = get_global_id(0);
-    if (i >= n) return;
-    float g = gate[i];
-    float silu_g = g / (1.0f + exp(-g));
-    out[i] = silu_g * up[i];
+    int n4 = n / 4;
+    if (i >= n4) return;
+
+    float4 g = vload4(i, gate);
+    float4 u = vload4(i, up);
+    float4 silu_g = g / ((float4)(1.0f) + exp(-g));
+    vstore4(silu_g * u, i, out);
 }
 
 //------------------------------------------------------------------------------
@@ -657,7 +660,7 @@ kernel void silu_f32(
 }
 
 //------------------------------------------------------------------------------
-// Element-wise Add
+// Element-wise Add (128-bit SIMD Vectorized)
 //------------------------------------------------------------------------------
 kernel void add_f32(
     global float *dst,
@@ -666,12 +669,15 @@ kernel void add_f32(
     int n
 ) {
     int i = get_global_id(0);
-    if (i >= n) return;
-    dst[i] = a[i] + b[i];
+    int n4 = n / 4;
+    if (i >= n4) return;
+    float4 va = vload4(i, a);
+    float4 vb = vload4(i, b);
+    vstore4(va + vb, i, dst);
 }
 
 //------------------------------------------------------------------------------
-// Element-wise Multiply
+// Element-wise Multiply (128-bit SIMD Vectorized)
 //------------------------------------------------------------------------------
 kernel void mul_f32(
     global float *dst,
@@ -680,12 +686,15 @@ kernel void mul_f32(
     int n
 ) {
     int i = get_global_id(0);
-    if (i >= n) return;
-    dst[i] = a[i] * b[i];
+    int n4 = n / 4;
+    if (i >= n4) return;
+    float4 va = vload4(i, a);
+    float4 vb = vload4(i, b);
+    vstore4(va * vb, i, dst);
 }
 
 //------------------------------------------------------------------------------
-// Copy
+// Copy (128-bit SIMD Vectorized)
 //------------------------------------------------------------------------------
 kernel void copy_f32(
     global float *dst,
@@ -693,8 +702,10 @@ kernel void copy_f32(
     int n
 ) {
     int i = get_global_id(0);
-    if (i >= n) return;
-    dst[i] = src[i];
+    int n4 = n / 4;
+    if (i >= n4) return;
+    float4 v = vload4(i, src);
+    vstore4(v, i, dst);
 }
 
 //------------------------------------------------------------------------------
