@@ -173,17 +173,26 @@ API: OpenCL 1.2
 
 ---
 
+## Research Foundation (2026 Theses)
+
+RELIC is architected according to recent literature in consumer-grade LLM inference and data-movement minimization:
+
+* 📄 **[2026 Research Theses & Applied Roadmap](file:///C:/Users/luann/Documents/Anamnesic/relic/docs/RESEARCH_THESES_2026.md)** — In-depth breakdown of 8 papers (ATSInfer, Llamas on the Web, Gated DeltaNet, Fast NF4, Cache-Resident Inference, SAW-INT4, FluxBin, Linear Attention) and their implementation in RELIC.
+
+---
+
 ## Roadmap
 
-* [ ] quantization support
-* [ ] Vulkan backend
-* [ ] Flash Attention experiments
-* [ ] speculative decoding
-* [ ] multi-GPU support
-* [ ] CUDA backend
-* [ ] Metal backend
-* [ ] continuous batching
-* [ ] MoE support
+* [x] OpenCL 1.2 & OpenCL 3.0 Backends
+* [x] Multi-Row 8x GEMV & Fused FFN (SwiGLU)
+* [x] Hardware Micro-Profiler (`devices.json`)
+* [x] Adaptive Memory Engine & Pinned Host Pools
+* [x] Distributed Heterogeneous Speculation (NVIDIA + Intel UHD/CPU)
+* [ ] ATSInfer Granular Tensor-Level Scheduler (`benefit_per_byte`)
+* [ ] Static Memory Planning & Auto-Tuned Kernel Registry
+* [ ] Fused Recurrent Operators (Gated DeltaNet / Qwen 3.5)
+* [ ] Ultra-low-bit LUT backend (Q2/Q3 for 1GB VRAM)
+
 
 ---
 

@@ -4,6 +4,7 @@
 #include "tokenizer.h"
 #include "inference.h"
 #include "planner/hardware_profile.h"
+#include "planner/adaptive_planner.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -37,6 +38,7 @@ int main(int argc, char **argv) {
     int device_idx = 0;
     bool list_devices = false;
     bool run_profile = false;
+    bool run_bench = false;
     bool cpu_only = false;
     bool speculative = false;
     int speculative_ngram = 3;
@@ -51,6 +53,7 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "-k") == 0 && i + 1 < argc) top_k = atoi(argv[++i]);
         else if (strcmp(argv[i], "--list-devices") == 0) list_devices = true;
         else if (strcmp(argv[i], "--profile") == 0) run_profile = true;
+        else if (strcmp(argv[i], "--bench") == 0) run_bench = true;
         else if (strcmp(argv[i], "--platform") == 0 && i + 1 < argc) platform_idx = atoi(argv[++i]);
         else if (strcmp(argv[i], "--device") == 0 && i + 1 < argc) device_idx = atoi(argv[++i]);
         else if (strcmp(argv[i], "--cpu") == 0) cpu_only = true;
@@ -164,6 +167,15 @@ int main(int argc, char **argv) {
         }
     }
 
+    // Run Adaptive Planner to determine optimal tensor placement
+    HardwareProfile prof = HardwareProfile::probe_system();
+    size_t vram_budget = cl_ok ? cl.dev.global_mem : 0;
+    ExecutionPlan plan = AdaptivePlanner::generate_plan(model, prof, vram_budget);
+    fprintf(stdout, "\n[Adaptive Planner] VRAM Budget: %.2f MB | Required: %.2f MB | Fully Offloaded Layers: %d/%lld\n",
+            (double)vram_budget / (1024.0 * 1024.0),
+            (double)plan.vram_required_bytes / (1024.0 * 1024.0),
+            plan.num_layers_fully_offloaded, (long long)model.n_layer);
+
     // Initialize inference engine
     InferenceEngine engine;
     engine.enable_speculative = speculative;
@@ -173,6 +185,26 @@ int main(int argc, char **argv) {
     if (!engine.init(&model, &tokenizer, cl_ok ? &cl : nullptr, max_seq_len)) {
         fprintf(stderr, "Failed to initialize inference engine\n");
         return 1;
+    }
+
+    if (run_bench) {
+        fprintf(stdout, "\n=== Relic Automated Benchmark Suite ===\n");
+        std::vector<std::pair<std::string, int>> bench_cases = {
+            {"The sky is", 15},
+            {"In a galaxy far, far away,", 20},
+            {"The color of the sky is blue. The color of the sky is blue. The color of the sky is", 25}
+        };
+
+        for (size_t idx = 0; idx < bench_cases.size(); idx++) {
+            fprintf(stdout, "\n------------------------------------------------------------\n");
+            fprintf(stdout, "Benchmark Case %zu/%zu: \"%s\" (Generate %d tokens)\n",
+                    idx + 1, bench_cases.size(), bench_cases[idx].first.c_str(), bench_cases[idx].second);
+            fprintf(stdout, "------------------------------------------------------------\n");
+            engine.generate(bench_cases[idx].first, bench_cases[idx].second, temperature, top_k);
+            engine.free_buffers();
+        }
+        fprintf(stdout, "\n=== Benchmark Complete ===\n");
+        return 0;
     }
 
     fprintf(stdout, "\n=== Relic Inference ===\n");

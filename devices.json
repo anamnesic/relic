@@ -1,0 +1,26 @@
+{
+  "cpu": {
+    "brand": "Intel Core i5-11400H / x86_64",
+    "cores": 12,
+    "ram_total_mb": 16163,
+    "ram_avail_mb": 8393
+  },
+  "devices": [
+    {
+      "name": "NVIDIA GeForce GTX 1650",
+      "memory_mb": 4095,
+      "max_alloc_mb": 1023,
+      "compute_units": 14,
+      "bandwidth_gbs": 128,
+      "dma_transfer_gbs": 11.5
+    },
+    {
+      "name": "Intel(R) UHD Graphics",
+      "memory_mb": 6465,
+      "max_alloc_mb": 3232,
+      "compute_units": 16,
+      "bandwidth_gbs": 25.6,
+      "dma_transfer_gbs": 25.6
+    }
+  ]
+}

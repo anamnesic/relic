@@ -78,12 +78,31 @@
   - [x] Target Model Verifier on NVIDIA GTX 1650 (Batched verification).
   - [x] Draft Model Generator on Intel UHD or CPU AVX2.
   - [x] Multi-device target-draft pipelining with verification metrics.
-- [x] **Intel UHD OpenCL 3.0 Backend Specialized Kernels** (`src/backends/intel_uhd_backend.h` / `.cpp`):
-  - [x] Shared host memory zero-copy draft pipeline on 11th Gen UHD Graphics (`CL_MEM_ALLOC_HOST_PTR`).
+- [ ] **Intel UHD OpenCL 3.0 Backend Specialized Kernels**:
+  - [ ] Shared host memory zero-copy draft pipeline on 11th Gen UHD Graphics.
 
 ---
 
-### 📊 Benchmark & Validation Milestones
+### 🔬 Phase 4: 2026 Research Foundation Milestones (`docs/RESEARCH_THESES_2026.md`)
+- [ ] **1. Tensor Planner & Granular Placement** (*ATSInfer - Jul/2026*):
+  - [ ] Per-tensor benefit score: $\text{benefit\_per\_byte} = \Delta \text{Latency} / \text{VRAM\_Bytes}$.
+  - [ ] Granular scheduling across Tier 0 (dGPU), Tier 1 (iGPU Shared), and Tier 2 (CPU RAM).
+- [ ] **2. Static Memory Planning & Kernel Registry** (*Llamas on the Web - Mai/2026*):
+  - [ ] Deterministic activation buffer reuse graph (zero runtime driver allocations).
+  - [ ] `DeviceProfile` & `KernelRegistry` with startup micro-benchmark autotuning.
+- [ ] **3. Fused Recurrent Operators for Hybrid Architectures** (*Gated DeltaNet - Jul/2026*):
+  - [ ] Mega-fused kernel: State Update $\to$ RMSNorm $\to$ Gating $\to$ Out Projection.
+- [ ] **4. Memory Hierarchy Optimization (`__local`)** (*Fast NF4 - Abr/2026*):
+  - [ ] Workgroup shared-memory caching for quantization scales, LUTs, and zero-points.
+- [ ] **5. Residency-First Execution Architecture** (*Cache-Resident LLM - Jun/2026*):
+  - [ ] Enforce data-movement minimization as first-class architectural cost.
+- [ ] **6. In-Kernel KV Quantization & LUT Ultra-Low-Bit** (*SAW-INT4 & FluxBin*):
+  - [ ] Inline rotation + quantization in attention kernels.
+  - [ ] Experimental LUT-based Q2/Q3 backend for 1GB VRAM hardware.
+
+---
+
+## 📊 Benchmark & Validation Milestones
 - [x] Baseline GPU Port: `0.39 tok/s`
 - [x] Multi-Row 8x & On-the-Fly Q4 Repack: `22.75 tok/s`
 - [x] Fused FFN (Gate + Up + SwiGLU): `24.48 tok/s`
@@ -91,4 +110,5 @@
 - [x] Phase 1 Decoupled Engine validation (100% tests passed).
 - [x] Phase 2 Async Prefetcher & Pinned Host Pool validation (100% tests passed).
 - [x] Phase 3 Distributed Speculative Engine validation (100% tests passed).
+- [ ] Phase 4 ATSInfer Tensor Planner & Static Memory Plan on 4GB / 1GB VRAM targets.
 - [x] Phase 3 Intel UHD Zero-Copy Shared Memory Backend validation (100% tests passed).
