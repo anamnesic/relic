@@ -171,63 +171,58 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
             std::vector<int> drafts = find_prompt_lookup_draft(all_tokens, speculative_ngram, speculative_max_draft);
             if (!drafts.empty())
             {
-                // Step 1: Pre-draft logits (produced by forward(last_token)) verify draft 0
-                int target_d0 = Sampler::sample(logits.data(), (size_t)model->n_vocab, temperature, top_k, 0.9f);
-                if (target_d0 == drafts[0])
+                size_t num_draft = drafts.size();
+                std::vector<float> batched_logits(num_draft * (size_t)model->n_vocab);
+
+                // Checkpoint recurrent state & KV cache before speculative exploration
+                decoder->save_state_checkpoint();
+
+                if (decoder->forward_batch(*model, drafts, n_past, batched_logits.data()) == 0)
                 {
-                    size_t num_draft = drafts.size();
-                    std::vector<float> batched_logits(num_draft * (size_t)model->n_vocab);
-
-                    // Checkpoint recurrent state & KV cache before speculative exploration
-                    decoder->save_state_checkpoint();
-
-                    if (decoder->forward_batch(*model, drafts, n_past, batched_logits.data()) == 0)
+                    int accepted_count = 0;
+                    for (size_t d = 0; d < num_draft; d++)
                     {
-                        int accepted_count = 1; // drafts[0] verified by pre-draft logits
-                        for (size_t d = 0; d + 1 < num_draft; d++)
+                        float *curr_logits_ptr = batched_logits.data() + d * (size_t)model->n_vocab;
+                        int target_pred = Sampler::sample(curr_logits_ptr, (size_t)model->n_vocab, temperature, top_k, 0.9f);
+                        if (target_pred == drafts[d])
                         {
-                            float *pred_logits = batched_logits.data() + d * (size_t)model->n_vocab;
-                            int target_pred = Sampler::sample(pred_logits, (size_t)model->n_vocab, temperature, top_k, 0.9f);
-                            if (target_pred == drafts[d + 1])
-                            {
-                                accepted_count++;
-                            }
-                            else
-                            {
-                                break;
-                            }
+                            accepted_count++;
                         }
-
-                        // If fewer than all drafts accepted, restore checkpoint and commit ONLY accepted tokens
-                        if (accepted_count < (int)num_draft)
+                        else
                         {
-                            decoder->restore_state_checkpoint();
-                            for (int i = 0; i < accepted_count; i++)
-                            {
-                                decoder->forward(*model, drafts[i], n_past + (int64_t)i, nullptr);
-                            }
-                        }
-
-                        for (int i = 0; i < accepted_count; i++)
-                        {
-                            if (generated_count >= max_tokens)
-                                break;
-                            accepted_spec_tokens++;
-                            n_past++;
-                            std::string draft_piece = tokenizer->decode({drafts[i]});
-                            output += draft_piece;
-                            fprintf(stdout, "%s", draft_piece.c_str());
-                            fflush(stdout);
-                            all_tokens.push_back(drafts[i]);
-                            generated_count++;
-                            float *last_acc_logits = batched_logits.data() + (size_t)i * (size_t)model->n_vocab;
-                            memcpy(logits.data(), last_acc_logits, (size_t)model->n_vocab * sizeof(float));
+                            break;
                         }
                     }
-                    else
+
+                    // If fewer than all drafts accepted, restore checkpoint and commit ONLY accepted tokens
+                    if (accepted_count < (int)num_draft)
                     {
                         decoder->restore_state_checkpoint();
+                        for (int i = 0; i < accepted_count; i++)
+                        {
+                            decoder->forward(*model, drafts[i], n_past + (int64_t)i, nullptr);
+                        }
                     }
+
+                    for (int i = 0; i < accepted_count; i++)
+                    {
+                        if (generated_count >= max_tokens)
+                            break;
+                        accepted_spec_tokens++;
+                        n_past++;
+                        std::string draft_piece = tokenizer->decode({drafts[i]});
+                        output += draft_piece;
+                        fprintf(stdout, "%s", draft_piece.c_str());
+                        fflush(stdout);
+                        all_tokens.push_back(drafts[i]);
+                        generated_count++;
+                        float *last_acc_logits = batched_logits.data() + (size_t)i * (size_t)model->n_vocab;
+                        memcpy(logits.data(), last_acc_logits, (size_t)model->n_vocab * sizeof(float));
+                    }
+                }
+                else
+                {
+                    decoder->restore_state_checkpoint();
                 }
             }
         }

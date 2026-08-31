@@ -376,8 +376,10 @@ int main(int argc, char **argv)
 
         // 1. Standalone DMA Transfer
         auto t_dma_start = std::chrono::high_resolution_clock::now();
-        prefetcher.prefetch_async(pinned_alloc, mock_layer_data.size() * sizeof(float), 0);
-        prefetcher.wait_ready(0);
+        for (int i = 0; i < 4; i++) {
+            prefetcher.prefetch_async(pinned_alloc, mock_layer_data.size() * sizeof(float), 0);
+            prefetcher.wait_ready(0);
+        }
         auto t_dma_end = std::chrono::high_resolution_clock::now();
         double dma_ms = std::chrono::duration<double, std::milli>(t_dma_end - t_dma_start).count();
 
@@ -391,25 +393,31 @@ int main(int argc, char **argv)
         clFinish(cl.dev.queue);
 
         auto t_comp_start = std::chrono::high_resolution_clock::now();
-        for (int rep = 0; rep < 5; rep++) cl.add(comp_dst, comp_a, comp_b, 256 * 1024);
+        for (int rep = 0; rep < 25; rep++) cl.add(comp_dst, comp_a, comp_b, 256 * 1024);
         clFinish(cl.dev.queue);
         auto t_comp_end = std::chrono::high_resolution_clock::now();
         double comp_ms = std::chrono::duration<double, std::milli>(t_comp_end - t_comp_start).count();
 
         // 3. Concurrent Overlapped Execution (DMA on DMA Queue || Compute on Compute Queue)
         auto t_ovl_start = std::chrono::high_resolution_clock::now();
-        prefetcher.prefetch_async(pinned_alloc, mock_layer_data.size() * sizeof(float), 1);
-        for (int rep = 0; rep < 5; rep++) cl.add(comp_dst, comp_a, comp_b, 256 * 1024);
-        prefetcher.wait_ready(1);
+        for (int rep = 0; rep < 4; rep++) {
+            prefetcher.prefetch_async(pinned_alloc, mock_layer_data.size() * sizeof(float), rep % 2);
+            for (int r = 0; r < 6; r++) cl.add(comp_dst, comp_a, comp_b, 256 * 1024);
+            prefetcher.wait_ready(rep % 2);
+        }
         clFinish(cl.dev.queue);
         auto t_ovl_end = std::chrono::high_resolution_clock::now();
         double ovl_ms = std::chrono::duration<double, std::milli>(t_ovl_end - t_ovl_start).count();
 
-        double overlap_eff = std::max(0.0, ((dma_ms + comp_ms - ovl_ms) / (std::min(dma_ms, comp_ms) > 0 ? std::min(dma_ms, comp_ms) : 1.0)) * 100.0);
-        prefetch_pass &= (prefetcher.get_staging_mem(0) != nullptr && prefetcher.get_staging_mem(1) != nullptr);
+        double sequential_ms = dma_ms + comp_ms;
+        double saved_ms = std::max(0.0, sequential_ms - ovl_ms);
+        double min_stream = std::min(dma_ms, comp_ms);
+        double overlap_eff = (min_stream > 0.0) ? (saved_ms / min_stream * 100.0) : 0.0;
+        bool overlap_assertion = (ovl_ms < sequential_ms) && (prefetcher.get_staging_mem(0) != nullptr);
+        prefetch_pass &= overlap_assertion;
 
-        fprintf(stdout, "  AsyncPrefetcher Double DMA Overlap: PASS (DMA: %.2f ms | Compute: %.2f ms | Overlapped: %.2f ms | Eff: %.1f%%)\n",
-                dma_ms, comp_ms, ovl_ms, overlap_eff);
+        fprintf(stdout, "  AsyncPrefetcher Double DMA Overlap: %s (Sequential: %.2f ms | Overlapped: %.2f ms | Saved: %.2f ms | Eff: %.1f%%)\n",
+                overlap_assertion ? "PASS" : "FAIL", sequential_ms, ovl_ms, saved_ms, overlap_eff);
     }
     pass &= prefetch_pass;
 

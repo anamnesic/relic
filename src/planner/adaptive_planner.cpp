@@ -111,20 +111,6 @@ ExecutionPlan AdaptivePlanner::generate_plan(
     {
         const auto &tensor = kv.second;
         size_t raw_bytes = tensor.data.size();
-        if (raw_bytes == 0)
-        {
-            int64_t ne = 1;
-            for (auto d : tensor.dims)
-                ne *= d;
-            if (tensor.type == GgmlType::Q4_0)
-                raw_bytes = (size_t)((ne + 31) / 32) * 18;
-            else if (tensor.type == GgmlType::Q8_0)
-                raw_bytes = (size_t)((ne + 31) / 32) * 34;
-            else if (tensor.type == GgmlType::F16)
-                raw_bytes = (size_t)ne * 2;
-            else
-                raw_bytes = (size_t)ne * 4;
-        }
         total_uncompressed_bytes += raw_bytes;
 
         GgmlType rep = choose_representation(kv.first, tensor, primary_device);
@@ -179,22 +165,6 @@ ExecutionPlan AdaptivePlanner::generate_plan(
         if (it == model.tensors.end())
             continue;
 
-        size_t tensor_raw_bytes = it->second.data.size();
-        if (tensor_raw_bytes == 0)
-        {
-            int64_t ne = 1;
-            for (auto d : it->second.dims)
-                ne *= d;
-            if (it->second.type == GgmlType::Q4_0)
-                tensor_raw_bytes = (size_t)((ne + 31) / 32) * 18;
-            else if (it->second.type == GgmlType::Q8_0)
-                tensor_raw_bytes = (size_t)((ne + 31) / 32) * 34;
-            else if (it->second.type == GgmlType::F16)
-                tensor_raw_bytes = (size_t)ne * 2;
-            else
-                tensor_raw_bytes = (size_t)ne * 4;
-        }
-
         TensorPlacementDecision dec;
         dec.tensor_name = est.tensor_name;
         dec.representation = est.representation;
@@ -219,32 +189,67 @@ ExecutionPlan AdaptivePlanner::generate_plan(
             // Sub-layer offload to Pinned Host RAM with Async Prefetch
             dec.target_tier = (secondary_device == BackendDeviceType::INTEL_IGPU) ? MemoryTier::TIER1_SHARED_IGPU : MemoryTier::TIER2_HOST_PINNED_RAM;
             dec.target_device = (secondary_device == BackendDeviceType::INTEL_IGPU) ? secondary_device : BackendDeviceType::CPU_AVX2;
-            dec.resident_bytes = tensor_raw_bytes;
+            size_t host_bytes = !it->second.data.empty() ? it->second.data.size() : est.memory_bytes;
+            dec.resident_bytes = host_bytes;
             dec.keep_resident_in_vram = false;
             dec.enable_async_prefetch = true;
             dec.data_movement_cost_ms = est.dma_transfer_time_ms;
 
-            plan.host_ram_required_bytes += tensor_raw_bytes;
+            plan.host_ram_required_bytes += host_bytes;
             total_transfer_time_ms += est.dma_transfer_time_ms;
         }
 
         plan.tensor_placements[est.tensor_name] = dec;
     }
 
-    // 4. Calculate Layer Offload Counts
+    // 4. Calculate Layer Offload Counts & Form Contiguous Device Islands
+    int64_t n_embd = model.architecture.n_embd > 0 ? model.architecture.n_embd : 2048;
+    double single_act_transfer_ms = (double)(n_embd * sizeof(float)) / (dma_bw * 1e9) * 1000.0;
+
+    BackendDeviceType current_island_dev = BackendDeviceType::UNKNOWN;
+    MemoryTier current_island_tier = MemoryTier::TIER0_DEDICATED_VRAM;
+    int island_start = 0;
+
     for (int64_t l = 0; l < model.n_layer; l++)
     {
         std::string prefix = "blk." + std::to_string(l) + ".";
         std::string ffn_down = prefix + "ffn_down.weight";
         auto it = plan.tensor_placements.find(ffn_down);
-        if (it != plan.tensor_placements.end() && it->second.keep_resident_in_vram)
+        BackendDeviceType layer_dev = primary_device;
+        MemoryTier layer_tier = MemoryTier::TIER0_DEDICATED_VRAM;
+
+        if (it != plan.tensor_placements.end())
         {
-            plan.num_layers_fully_offloaded++;
+            layer_dev = it->second.target_device;
+            layer_tier = it->second.target_tier;
+            if (it->second.keep_resident_in_vram)
+            {
+                plan.num_layers_fully_offloaded++;
+            }
+            else
+            {
+                plan.num_layers_sublayer_offloaded++;
+            }
         }
-        else
+
+        if (l == 0)
         {
-            plan.num_layers_sublayer_offloaded++;
+            current_island_dev = layer_dev;
+            current_island_tier = layer_tier;
+            island_start = 0;
         }
+        else if (layer_dev != current_island_dev)
+        {
+            plan.islands.push_back({island_start, (int)l - 1, current_island_dev, current_island_tier});
+            plan.activation_boundary_cost_ms += single_act_transfer_ms * 2.0; // Two-way activation boundary bridge
+            island_start = (int)l;
+            current_island_dev = layer_dev;
+            current_island_tier = layer_tier;
+        }
+    }
+    if (model.n_layer > 0)
+    {
+        plan.islands.push_back({island_start, (int)model.n_layer - 1, current_island_dev, current_island_tier});
     }
 
     // 5. Data Movement & Footprint Reduction Metrics

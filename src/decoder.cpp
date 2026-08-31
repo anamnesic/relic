@@ -476,14 +476,19 @@ namespace
                 prefetcher->initialize(64 * 1024 * 1024);
             }
 
-            // Initialize Pinned Host Memory Pool for zero-copy streaming
-            pinned_pool = std::make_unique<PinnedHostPool>(256 * 1024 * 1024);
+            // Initialize Pinned Host Memory Pool with constant 128 MB sliding staging window
+            pinned_pool = std::make_unique<PinnedHostPool>(128 * 1024 * 1024);
 
-            // Initialize Intel UHD Shared Memory Backend
+            // Initialize Intel UHD Shared Memory Backend with persistent activation buffers
             intel_backend = std::make_unique<IntelUhdBackend>();
             if (!intel_backend->initialize())
             {
                 intel_backend.reset();
+            }
+            else
+            {
+                uhd_in_buf_ = intel_backend->allocate(16384 * sizeof(float), MemoryTier::TIER1_SHARED_IGPU);
+                uhd_dst_buf_ = intel_backend->allocate(16384 * sizeof(float), MemoryTier::TIER1_SHARED_IGPU);
             }
 
             return true;
@@ -503,10 +508,6 @@ namespace
                         clEnqueueCopyBuffer(cl->dev.queue, gpu_ssm_states[l].mem, gpu_ssm_snapshot_[l].mem, 0, 0, 16 * 128 * 128 * sizeof(float), 0, nullptr, nullptr);
                     if (gpu_conv_states[l].mem && l < gpu_conv_snapshot_.size() && gpu_conv_snapshot_[l].mem)
                         clEnqueueCopyBuffer(cl->dev.queue, gpu_conv_states[l].mem, gpu_conv_snapshot_[l].mem, 0, 0, (size_t)(3 * total_qkv * sizeof(float)), 0, nullptr, nullptr);
-                    if (gpu_k_caches[l].mem && l < gpu_k_snapshot_.size() && gpu_k_snapshot_[l].mem)
-                        clEnqueueCopyBuffer(cl->dev.queue, gpu_k_caches[l].mem, gpu_k_snapshot_[l].mem, 0, 0, (size_t)(seq_limit * arch.n_embd * sizeof(float)), 0, nullptr, nullptr);
-                    if (gpu_v_caches[l].mem && l < gpu_v_snapshot_.size() && gpu_v_snapshot_[l].mem)
-                        clEnqueueCopyBuffer(cl->dev.queue, gpu_v_caches[l].mem, gpu_v_snapshot_[l].mem, 0, 0, (size_t)(seq_limit * arch.n_embd * sizeof(float)), 0, nullptr, nullptr);
                 }
                 clFinish(cl->dev.queue);
             }
@@ -526,10 +527,6 @@ namespace
                         clEnqueueCopyBuffer(cl->dev.queue, gpu_ssm_snapshot_[l].mem, gpu_ssm_states[l].mem, 0, 0, 16 * 128 * 128 * sizeof(float), 0, nullptr, nullptr);
                     if (gpu_conv_states[l].mem && l < gpu_conv_snapshot_.size() && gpu_conv_snapshot_[l].mem)
                         clEnqueueCopyBuffer(cl->dev.queue, gpu_conv_snapshot_[l].mem, gpu_conv_states[l].mem, 0, 0, (size_t)(3 * total_qkv * sizeof(float)), 0, nullptr, nullptr);
-                    if (gpu_k_caches[l].mem && l < gpu_k_snapshot_.size() && gpu_k_snapshot_[l].mem)
-                        clEnqueueCopyBuffer(cl->dev.queue, gpu_k_snapshot_[l].mem, gpu_k_caches[l].mem, 0, 0, (size_t)(seq_limit * arch.n_embd * sizeof(float)), 0, nullptr, nullptr);
-                    if (gpu_v_caches[l].mem && l < gpu_v_snapshot_.size() && gpu_v_snapshot_[l].mem)
-                        clEnqueueCopyBuffer(cl->dev.queue, gpu_v_snapshot_[l].mem, gpu_v_caches[l].mem, 0, 0, (size_t)(seq_limit * arch.n_embd * sizeof(float)), 0, nullptr, nullptr);
                 }
                 clFinish(cl->dev.queue);
             }
@@ -672,7 +669,7 @@ namespace
 
             // 2. Check if resident on Intel UHD shared memory (True Cross-Context Execution Bridge)
             auto uhd_it = intel_tensors.find(name);
-            if (uhd_it != intel_tensors.end() && intel_backend)
+            if (uhd_it != intel_tensors.end() && intel_backend && uhd_in_buf_ && uhd_dst_buf_)
             {
                 // Cross-Context Bridge:
                 // GTX in -> Host Staging -> Intel UHD Buffer -> Compute on Intel iGPU -> Host Staging -> GTX dst
@@ -681,26 +678,20 @@ namespace
 
                 clEnqueueReadBuffer(cl->dev.queue, in.mem, CL_TRUE, 0, (size_t)(K * sizeof(float)), weights.data(), 0, nullptr, nullptr);
 
-                auto uhd_in = intel_backend->allocate((size_t)(K * sizeof(float)), MemoryTier::TIER1_SHARED_IGPU);
-                auto uhd_dst = intel_backend->allocate((size_t)(N * sizeof(float)), MemoryTier::TIER1_SHARED_IGPU);
-
-                if (uhd_in && uhd_dst)
+                intel_backend->upload(*uhd_in_buf_, weights.data(), (size_t)(K * sizeof(float)));
+                if (t.type == GgmlType::Q4_0)
                 {
-                    intel_backend->upload(*uhd_in, weights.data(), (size_t)(K * sizeof(float)));
-                    if (t.type == GgmlType::Q4_0)
-                    {
-                        intel_backend->gemv_q4_0(*uhd_dst, *uhd_in, *(uhd_it->second), N, K);
-                    }
-                    else if (t.type == GgmlType::Q8_0)
-                    {
-                        intel_backend->gemv_q8_0(*uhd_dst, *uhd_in, *(uhd_it->second), N, K);
-                    }
-                    intel_backend->synchronize();
-                    intel_backend->download(weights.data(), *uhd_dst, (size_t)(N * sizeof(float)));
-
-                    clEnqueueWriteBuffer(cl->dev.queue, dst.mem, CL_TRUE, 0, (size_t)(N * sizeof(float)), weights.data(), 0, nullptr, nullptr);
-                    return;
+                    intel_backend->gemv_q4_0(*uhd_dst_buf_, *uhd_in_buf_, *(uhd_it->second), N, K);
                 }
+                else if (t.type == GgmlType::Q8_0)
+                {
+                    intel_backend->gemv_q8_0(*uhd_dst_buf_, *uhd_in_buf_, *(uhd_it->second), N, K);
+                }
+                intel_backend->synchronize();
+                intel_backend->download(weights.data(), *uhd_dst_buf_, (size_t)(N * sizeof(float)));
+
+                clEnqueueWriteBuffer(cl->dev.queue, dst.mem, CL_TRUE, 0, (size_t)(N * sizeof(float)), weights.data(), 0, nullptr, nullptr);
+                return;
             }
 
             // 3. Check if stored in Pinned Host Pool (AsyncPrefetcher DMA Stream)
@@ -1358,6 +1349,8 @@ namespace
         std::unique_ptr<PinnedHostPool> pinned_pool;
         std::unique_ptr<AsyncPrefetcher> prefetcher;
         std::unique_ptr<IntelUhdBackend> intel_backend;
+        std::shared_ptr<BackendBuffer> uhd_in_buf_;
+        std::shared_ptr<BackendBuffer> uhd_dst_buf_;
         std::unordered_map<std::string, void *> pinned_tensor_ptrs;
         std::unordered_map<std::string, std::shared_ptr<BackendBuffer>> intel_tensors;
 

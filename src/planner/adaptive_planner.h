@@ -4,6 +4,7 @@
 #include <unordered_map>
 #include "hardware_profile.h"
 #include "../model.h"
+#include "../backends/backend.h"
 
 struct TensorCostEstimate
 {
@@ -30,6 +31,14 @@ struct TensorPlacementDecision
     double data_movement_cost_ms;
 };
 
+struct DeviceIsland
+{
+    int start_layer = 0;
+    int end_layer = 0;
+    BackendDeviceType device = BackendDeviceType::UNKNOWN;
+    MemoryTier tier = MemoryTier::TIER0_DEDICATED_VRAM;
+};
+
 struct ExecutionPlan
 {
     size_t vram_required_bytes = 0;
@@ -39,12 +48,14 @@ struct ExecutionPlan
     double pcie_traffic_reduction_pct = 0.0;
     double estimated_dma_overlap_efficiency = 0.0;
     double total_data_movement_cost_ms = 0.0;
+    double activation_boundary_cost_ms = 0.0;
     int num_layers_fully_offloaded = 0;
     int num_layers_sublayer_offloaded = 0;
     BackendDeviceType primary_device = BackendDeviceType::UNKNOWN;
     BackendDeviceType secondary_device = BackendDeviceType::UNKNOWN;
     std::unordered_map<std::string, TensorPlacementDecision> tensor_placements;
     std::vector<TensorCostEstimate> cost_rankings;
+    std::vector<DeviceIsland> islands;
 };
 
 class AdaptivePlanner
