@@ -62,13 +62,17 @@ size_t AdaptivePlanner::get_tensor_vram_size(const LlamaModel::Tensor &tensor, B
 ExecutionPlan AdaptivePlanner::generate_plan(
     const LlamaModel &model,
     const HardwareProfile &hardware,
-    size_t vram_budget_bytes)
+    size_t vram_budget_bytes,
+    bool enable_uhd,
+    bool enable_dma_overlap)
 {
     ExecutionPlan plan;
     plan.vram_required_bytes = 0;
     plan.host_ram_required_bytes = 0;
     plan.num_layers_fully_offloaded = 0;
     plan.num_layers_sublayer_offloaded = 0;
+    plan.enable_uhd = enable_uhd;
+    plan.enable_dma_overlap = enable_dma_overlap;
 
     // 1. Dynamic Device Selection from HardwareProfile
     BackendDeviceType primary_device = BackendDeviceType::CPU_AVX2;
@@ -86,7 +90,7 @@ ExecutionPlan AdaptivePlanner::generate_plan(
             dgpu_bw = dev.memory_bandwidth_gbs > 0 ? dev.memory_bandwidth_gbs : 128.0;
             dma_bw = dev.dma_transfer_bandwidth_gbs > 0 ? dev.dma_transfer_bandwidth_gbs : 11.5;
         }
-        else if (dev.type == BackendDeviceType::INTEL_IGPU)
+        else if (dev.type == BackendDeviceType::INTEL_IGPU && enable_uhd)
         {
             if (primary_device == BackendDeviceType::CPU_AVX2)
             {
@@ -193,7 +197,7 @@ ExecutionPlan AdaptivePlanner::generate_plan(
             size_t host_bytes = !it->second.data.empty() ? it->second.data.size() : est.memory_bytes;
             dec.resident_bytes = host_bytes;
             dec.keep_resident_in_vram = false;
-            dec.enable_async_prefetch = true;
+            dec.enable_async_prefetch = enable_dma_overlap;
             dec.data_movement_cost_ms = est.dma_transfer_time_ms;
 
             if (secondary_device == BackendDeviceType::INTEL_IGPU)
@@ -217,7 +221,7 @@ ExecutionPlan AdaptivePlanner::generate_plan(
     size_t state_overhead_bytes = (size_t)model.n_layer * (16 * 128 * 128 * sizeof(float) + 3 * 2048 * sizeof(float))
                                 + (size_t)2048 * n_embd_val * sizeof(float) * 2
                                 + (size_t)64 * 1024 * 1024;
-    plan.actual_gtx_allocation_peak_bytes = plan.gtx_vram_weights_bytes + state_overhead_bytes;
+    plan.accounted_gtx_allocation_bytes = plan.gtx_vram_weights_bytes + state_overhead_bytes;
 
     // 4. Calculate Layer Offload Counts & Form Contiguous Device Islands
     int64_t n_embd = model.architecture.n_embd > 0 ? model.architecture.n_embd : 2048;

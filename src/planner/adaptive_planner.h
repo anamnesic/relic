@@ -46,7 +46,7 @@ struct ExecutionPlan
     size_t gtx_vram_weights_bytes = 0;
     size_t intel_uhd_weights_bytes = 0;
     size_t pinned_streamed_weights_bytes = 0;
-    size_t actual_gtx_allocation_peak_bytes = 0;
+    size_t accounted_gtx_allocation_bytes = 0;
     size_t total_model_uncompressed_bytes = 0;
     double vram_footprint_reduction_pct = 0.0;
     double pcie_traffic_reduction_pct = 0.0;
@@ -55,6 +55,8 @@ struct ExecutionPlan
     double activation_boundary_cost_ms = 0.0;
     int num_layers_fully_offloaded = 0;
     int num_layers_sublayer_offloaded = 0;
+    bool enable_uhd = true;
+    bool enable_dma_overlap = true;
     BackendDeviceType primary_device = BackendDeviceType::UNKNOWN;
     BackendDeviceType secondary_device = BackendDeviceType::UNKNOWN;
     std::unordered_map<std::string, TensorPlacementDecision> tensor_placements;
@@ -71,5 +73,7 @@ public:
     static ExecutionPlan generate_plan(
         const LlamaModel &model,
         const HardwareProfile &hardware,
-        size_t vram_budget_bytes);
+        size_t vram_budget_bytes,
+        bool enable_uhd = true,
+        bool enable_dma_overlap = true);
 };

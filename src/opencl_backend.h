@@ -48,6 +48,30 @@ struct ClDevice {
     int opencl_c_minor = 2;
 };
 
+struct ClMemoryTracker {
+    static inline size_t current_bytes = 0;
+    static inline size_t peak_bytes = 0;
+
+    static void record_alloc(size_t bytes) {
+        current_bytes += bytes;
+        if (current_bytes > peak_bytes) {
+            peak_bytes = current_bytes;
+        }
+    }
+
+    static void record_free(size_t bytes) {
+        if (current_bytes >= bytes) {
+            current_bytes -= bytes;
+        } else {
+            current_bytes = 0;
+        }
+    }
+
+    static void reset_peak() {
+        peak_bytes = current_bytes;
+    }
+};
+
 struct ClBuffer {
     cl_mem mem = nullptr;
     size_t size = 0;
@@ -84,11 +108,13 @@ struct ClBuffer {
             return false;
         }
         size = bytes;
+        ClMemoryTracker::record_alloc(bytes);
         return true;
     }
 
     void release() {
         if (mem) {
+            ClMemoryTracker::record_free(size);
             clReleaseMemObject(mem);
             mem = nullptr;
             size = 0;

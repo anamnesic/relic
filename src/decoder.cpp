@@ -487,8 +487,9 @@ namespace
             }
             else
             {
-                uhd_in_buf_ = intel_backend->allocate(16384 * sizeof(float), MemoryTier::TIER1_SHARED_IGPU);
-                uhd_dst_buf_ = intel_backend->allocate(16384 * sizeof(float), MemoryTier::TIER1_SHARED_IGPU);
+                size_t max_act_elems = (size_t)std::max(arch.n_vocab, (int64_t)65536);
+                uhd_in_buf_ = intel_backend->allocate(max_act_elems * sizeof(float), MemoryTier::TIER1_SHARED_IGPU);
+                uhd_dst_buf_ = intel_backend->allocate(max_act_elems * sizeof(float), MemoryTier::TIER1_SHARED_IGPU);
             }
 
             return true;
@@ -1287,7 +1288,7 @@ namespace
                 auto out_w = model.tensors.find("output.weight");
                 if (out_w == model.tensors.end())
                     out_w = model.tensors.find("token_embd.weight");
-                if (out_w != model.tensors.end())
+                if (out_w != model.tensors.end() && logits)
                 {
                     const int64_t chunk_v = 4096;
                     for (int64_t v_start = 0; v_start < n_vocab; v_start += chunk_v)
