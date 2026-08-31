@@ -639,13 +639,21 @@ public:
 
                 auto w_gate = model.tensors.find(prefix + "ffn_gate.weight");
                 auto w_up = model.tensors.find(prefix + "ffn_up.weight");
-                auto w_down = model.tensors.find(prefix + "ffn_down.weight");
-
                 if (w_gate != model.tensors.end() && w_up != model.tensors.end()) {
-                    dispatch_gemv(gpu_gate, gpu_hidden, prefix + "ffn_gate.weight", w_gate->second, n_ff, n_embd);
-                    dispatch_gemv(gpu_up, gpu_hidden, prefix + "ffn_up.weight", w_up->second, n_ff, n_embd);
-                    cl->swiglu(gpu_ffn_act, gpu_gate, gpu_up, n_ff);
+                    ClBuffer *gate_buf = gpu_store.get(prefix + "ffn_gate.weight");
+                    ClBuffer *up_buf = gpu_store.get(prefix + "ffn_up.weight");
+                    GgmlType gate_type = gpu_store.get_type(prefix + "ffn_gate.weight", w_gate->second.type);
+                    GgmlType up_type = gpu_store.get_type(prefix + "ffn_up.weight", w_up->second.type);
+                    if (gate_buf && up_buf && gate_type == GgmlType::Q4_0 && up_type == GgmlType::Q4_0) {
+                        // Fused Multi-Row 8x FFN (Gate + Up + SwiGLU in 1 kernel pass)
+                        cl->gemv_q4_0_ffn_swiglu(gpu_ffn_act, gpu_hidden, *gate_buf, *up_buf, n_ff, n_embd);
+                    } else {
+                        dispatch_gemv(gpu_gate, gpu_hidden, prefix + "ffn_gate.weight", w_gate->second, n_ff, n_embd);
+                        dispatch_gemv(gpu_up, gpu_hidden, prefix + "ffn_up.weight", w_up->second, n_ff, n_embd);
+                        cl->swiglu(gpu_ffn_act, gpu_gate, gpu_up, n_ff);
+                    }
 
+                    auto w_down = model.tensors.find(prefix + "ffn_down.weight");
                     if (w_down != model.tensors.end()) {
                         dispatch_gemv(gpu_hidden, gpu_ffn_act, prefix + "ffn_down.weight", w_down->second, n_embd, n_ff);
                     }

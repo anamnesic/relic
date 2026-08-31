@@ -352,6 +352,118 @@ kernel void gemv_q4_0(
 }
 
 //------------------------------------------------------------------------------
+// FUSED FFN: Multi-Row 8x GEMV (Gate + Up) + SiLU + Mul in 1 Kernel Launch
+// Reads input 'a' once, computes Gate & Up simultaneously, applies SwiGLU in registers!
+//------------------------------------------------------------------------------
+kernel void gemv_q4_0_ffn_swiglu(
+    global const float *a,          // [K = 2048]
+    global const uchar *b_gate,     // [N = 6144, K = 2048]
+    global const uchar *b_up,       // [N = 6144, K = 2048]
+    global float *dst,              // [N = 6144]
+    int N,
+    int K
+) {
+    local float l_gate[8][32];
+    local float l_up[8][32];
+
+    int base_row = get_group_id(0) * 8;
+    int tid = get_local_id(0);
+    int wg_size = get_local_size(0);
+
+    int n_blocks = K / 32;
+    global const uchar *gate_ptrs[8];
+    global const uchar *up_ptrs[8];
+    for (int r = 0; r < 8; r++) {
+        int row = base_row + r;
+        gate_ptrs[r] = (row < N) ? (b_gate + (size_t)row * (size_t)(n_blocks * 18)) : b_gate;
+        up_ptrs[r]   = (row < N) ? (b_up   + (size_t)row * (size_t)(n_blocks * 18)) : b_up;
+    }
+
+    float sum_gate[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float sum_up[8]   = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+
+    for (int blk = tid; blk < n_blocks; blk += wg_size) {
+        global const float *a_blk = a + blk * 32;
+
+        float d_gate[8], d_up[8];
+        global const uchar *qs_gate[8], *qs_up[8];
+        for (int r = 0; r < 8; r++) {
+            global const uchar *bg = gate_ptrs[r] + (size_t)blk * 18;
+            d_gate[r] = fp16_to_fp32((ushort)bg[0] | ((ushort)bg[1] << 8));
+            qs_gate[r] = bg + 2;
+
+            global const uchar *bu = up_ptrs[r] + (size_t)blk * 18;
+            d_up[r] = fp16_to_fp32((ushort)bu[0] | ((ushort)bu[1] << 8));
+            qs_up[r] = bu + 2;
+        }
+
+        for (int i = 0; i < 4; i++) {
+            float4 a_lo = vload4(i, a_blk);
+            float4 a_hi = vload4(i + 4, a_blk);
+
+            for (int r = 0; r < 8; r++) {
+                uchar4 qb_g = vload4(i, qs_gate[r]);
+                float4 vg_lo = (convert_float4(qb_g & (uchar4)0x0F) - (float4)8.0f) * d_gate[r];
+                float4 vg_hi = (convert_float4(qb_g >> (uchar4)4)   - (float4)8.0f) * d_gate[r];
+                sum_gate[r] += dot(a_lo, vg_lo) + dot(a_hi, vg_hi);
+
+                uchar4 qb_u = vload4(i, qs_up[r]);
+                float4 vu_lo = (convert_float4(qb_u & (uchar4)0x0F) - (float4)8.0f) * d_up[r];
+                float4 vu_hi = (convert_float4(qb_u >> (uchar4)4)   - (float4)8.0f) * d_up[r];
+                sum_up[r] += dot(a_lo, vu_lo) + dot(a_hi, vu_hi);
+            }
+        }
+    }
+
+    for (int r = 0; r < 8; r++) {
+        l_gate[r][tid] = sum_gate[r];
+        l_up[r][tid]   = sum_up[r];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    if (tid < 16) {
+        for (int r = 0; r < 8; r++) {
+            l_gate[r][tid] += l_gate[r][tid + 16];
+            l_up[r][tid]   += l_up[r][tid + 16];
+        }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (tid < 8) {
+        for (int r = 0; r < 8; r++) {
+            l_gate[r][tid] += l_gate[r][tid + 8];
+            l_up[r][tid]   += l_up[r][tid + 8];
+        }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (tid < 4) {
+        for (int r = 0; r < 8; r++) {
+            l_gate[r][tid] += l_gate[r][tid + 4];
+            l_up[r][tid]   += l_up[r][tid + 4];
+        }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (tid < 2) {
+        for (int r = 0; r < 8; r++) {
+            l_gate[r][tid] += l_gate[r][tid + 2];
+            l_up[r][tid]   += l_up[r][tid + 2];
+        }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    if (tid == 0) {
+        for (int r = 0; r < 8; r++) {
+            int row = base_row + r;
+            if (row < N) {
+                float g = l_gate[r][0] + l_gate[r][1];
+                float u = l_up[r][0] + l_up[r][1];
+                float silu_g = g / (1.0f + exp(-g));
+                dst[row] = silu_g * u;
+            }
+        }
+    }
+}
+
+//------------------------------------------------------------------------------
 // Fused SwiGLU (128-bit SIMD Vectorized): dst[i] = silu(gate[i]) * up[i]
 //------------------------------------------------------------------------------
 kernel void swiglu_f32(

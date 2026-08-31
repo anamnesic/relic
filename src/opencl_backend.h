@@ -145,6 +145,7 @@ public:
     void gemv_f32_nt(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t N, int64_t K);
     void gemv_q8_0(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t N, int64_t K);
     void gemv_q4_0(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t N, int64_t K);
+    void gemv_q4_0_ffn_swiglu(ClBuffer &dst, ClBuffer &a, ClBuffer &b_gate, ClBuffer &b_up, int64_t N, int64_t K);
     void swiglu(ClBuffer &dst, ClBuffer &gate, ClBuffer &up, int64_t n);
     void add_rms_norm(ClBuffer &residual, ClBuffer &branch, ClBuffer &weight, ClBuffer &norm_out, int64_t n, float eps = 1e-6f);
     void qwen_conv1d(ClBuffer &conv_state, ClBuffer &conv_in, ClBuffer &weight, ClBuffer &conv_out, int64_t C);

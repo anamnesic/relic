@@ -428,6 +428,26 @@ void OpenClBackend::gemv_q4_0(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t N
     CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr), "gemv_q4_0");
 }
 
+void OpenClBackend::gemv_q4_0_ffn_swiglu(ClBuffer &dst, ClBuffer &a, ClBuffer &b_gate, ClBuffer &b_up, int64_t N, int64_t K) {
+    static ClKernel knl;
+    if (!knl.kernel) {
+        build_kernel(knl, caicos_kernel_source, "gemv_q4_0_ffn_swiglu");
+    }
+
+    clSetKernelArg(knl.kernel, 0, sizeof(cl_mem), &a.mem);
+    clSetKernelArg(knl.kernel, 1, sizeof(cl_mem), &b_gate.mem);
+    clSetKernelArg(knl.kernel, 2, sizeof(cl_mem), &b_up.mem);
+    clSetKernelArg(knl.kernel, 3, sizeof(cl_mem), &dst.mem);
+    cl_int n = (cl_int)N, k = (cl_int)K;
+    clSetKernelArg(knl.kernel, 4, sizeof(cl_int), &n);
+    clSetKernelArg(knl.kernel, 5, sizeof(cl_int), &k);
+
+    size_t local = 32;
+    size_t n_groups = ((size_t)N + 7) / 8;
+    size_t global = n_groups * local;
+    CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr), "gemv_q4_0_ffn_swiglu");
+}
+
 void OpenClBackend::swiglu(ClBuffer &dst, ClBuffer &gate, ClBuffer &up, int64_t n) {
     static ClKernel knl;
     if (!knl.kernel) {
