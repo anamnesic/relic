@@ -388,32 +388,41 @@ public:
         }
     }
 
+    void warm_up(const LlamaModel &model) override {
+        ensure_weights_uploaded(model);
+    }
+
     void ensure_weights_uploaded(const LlamaModel &model) {
         if (!use_gpu || !cl || !cl->initialized || weights_uploaded) return;
-        fprintf(stdout, "Uploading model weights to GPU VRAM...\n");
+        fprintf(stdout, "Uploading model weights to GPU VRAM (On-the-Fly Q4 Repacking active)...\n");
         fflush(stdout);
         size_t total_uploaded = 0;
+        size_t total_original = 0;
         for (const auto &kv : model.tensors) {
-            if (gpu_store.upload(cl->dev.context, cl->dev.queue, kv.first, kv.second.data.data(), kv.second.data.size())) {
-                total_uploaded += kv.second.data.size();
+            total_original += kv.second.data.size();
+            size_t uploaded_bytes = 0;
+            if (gpu_store.upload_auto_q4(cl->dev.context, cl->dev.queue, kv.first, kv.second.data.data(), kv.second.data.size(), kv.second.type, kv.second.nelements(), uploaded_bytes)) {
+                total_uploaded += uploaded_bytes;
             }
         }
         clFinish(cl->dev.queue);
-        fprintf(stdout, "VRAM Residency active: %.2f MB resident in GPU memory.\n", (double)total_uploaded / (1024.0 * 1024.0));
+        fprintf(stdout, "VRAM Residency active: %.2f MB resident in GPU memory (compressed from %.2f MB, ~50%% memory traffic savings).\n",
+                (double)total_uploaded / (1024.0 * 1024.0), (double)total_original / (1024.0 * 1024.0));
         fflush(stdout);
         weights_uploaded = true;
     }
 
     void dispatch_gemv(ClBuffer &dst, ClBuffer &in, const std::string &name, const LlamaModel::Tensor &t, int64_t N, int64_t K) {
         ClBuffer *w_buf = gpu_store.get(name);
+        GgmlType actual_type = gpu_store.get_type(name, t.type);
         if (w_buf) {
-            if (t.type == GgmlType::Q8_0) {
-                cl->gemv_q8_0(dst, in, *w_buf, N, K);
-                return;
-            } else if (t.type == GgmlType::Q4_0) {
+            if (actual_type == GgmlType::Q4_0) {
                 cl->gemv_q4_0(dst, in, *w_buf, N, K);
                 return;
-            } else if (t.type == GgmlType::F32) {
+            } else if (actual_type == GgmlType::Q8_0) {
+                cl->gemv_q8_0(dst, in, *w_buf, N, K);
+                return;
+            } else if (actual_type == GgmlType::F32) {
                 cl->gemv_f32_nt(dst, in, *w_buf, N, K);
                 return;
             }

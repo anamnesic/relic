@@ -28,6 +28,8 @@ bool InferenceEngine::init(LlamaModel *m, Tokenizer *tok, OpenClBackend *backend
         return false;
     }
 
+    decoder->warm_up(*model);
+
     return true;
 }
 

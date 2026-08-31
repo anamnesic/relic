@@ -423,7 +423,7 @@ void OpenClBackend::gemv_q4_0(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t N
     clSetKernelArg(knl.kernel, 4, sizeof(cl_int), &k);
 
     size_t local = 32;
-    size_t n_groups = ((size_t)N + 3) / 4;
+    size_t n_groups = ((size_t)N + 7) / 8;
     size_t global = n_groups * local;
     CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr), "gemv_q4_0");
 }

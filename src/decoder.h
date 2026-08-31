@@ -22,6 +22,9 @@ public:
 
     // Executes a forward pass for a single token at the specified sequence position.
     virtual int forward(const LlamaModel &model, int token_id, int64_t position, float *logits) = 0;
+
+    // Optional pre-computation / GPU VRAM weight upload ahead of generation timing.
+    virtual void warm_up(const LlamaModel &model) {}
 };
 
 // Factory function to create the appropriate decoder adapter for the architecture.
