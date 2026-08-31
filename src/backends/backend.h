@@ -5,7 +5,8 @@
 #include <vector>
 #include <memory>
 
-enum class BackendDeviceType {
+enum class BackendDeviceType
+{
     NVIDIA_GPU,
     INTEL_IGPU,
     AMD_GPU,
@@ -13,7 +14,8 @@ enum class BackendDeviceType {
     UNKNOWN
 };
 
-enum class MemoryTier {
+enum class MemoryTier
+{
     TIER0_DEDICATED_VRAM,  // Dedicated GDDR (Fastest: ~128 GB/s)
     TIER1_SHARED_IGPU,     // Integrated GPU Unified Memory (~25-35 GB/s)
     TIER2_HOST_PINNED_RAM, // Pinned Host System RAM (DMA Capable)
@@ -21,7 +23,30 @@ enum class MemoryTier {
     TIER4_MMAP_STORAGE     // NVMe / SSD Backed
 };
 
-struct DeviceStats {
+struct DeviceProfile
+{
+    std::string device_name;
+    BackendDeviceType type = BackendDeviceType::UNKNOWN;
+    size_t total_memory_bytes = 0;
+    size_t free_memory_bytes = 0;
+    size_t max_alloc_bytes = 0;
+    size_t local_mem_bytes = 0;
+    size_t max_workgroup_size = 256;
+    int compute_units = 0;
+    int vector_width = 4;
+    int subgroup_size = 32;
+    bool fp16_supported = false;
+    bool subgroups_supported = false;
+    bool is_unified_memory = false;
+    double tflops_fp32 = 0.0;
+    double memory_bandwidth_gbs = 0.0;
+    double dma_transfer_bandwidth_gbs = 0.0;
+    std::string driver_version;
+    std::string opencl_c_version;
+};
+
+struct DeviceStats
+{
     std::string device_name;
     BackendDeviceType type;
     size_t total_memory_bytes;
@@ -31,23 +56,26 @@ struct DeviceStats {
     double tflops_fp32;
     double memory_bandwidth_gbs;
     double dma_transfer_bandwidth_gbs;
+    DeviceProfile profile;
 };
 
 // Abstract device memory buffer handle
-class BackendBuffer {
+class BackendBuffer
+{
 public:
     virtual ~BackendBuffer() = default;
-    virtual void* raw_handle() = 0;
+    virtual void *raw_handle() = 0;
     virtual size_t size() const = 0;
     virtual MemoryTier tier() const = 0;
 };
 
 // Core Backend Abstraction Interface
-class Backend {
+class Backend
+{
 public:
     virtual ~Backend() = default;
 
-    virtual const std::string& name() const = 0;
+    virtual const std::string &name() const = 0;
     virtual BackendDeviceType type() const = 0;
     virtual bool initialize() = 0;
     virtual DeviceStats query_stats() = 0;

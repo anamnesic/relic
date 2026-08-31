@@ -3,24 +3,38 @@
     "brand": "Intel Core i5-11400H / x86_64",
     "cores": 12,
     "ram_total_mb": 16163,
-    "ram_avail_mb": 8393
+    "ram_avail_mb": 4301
   },
   "devices": [
     {
       "name": "NVIDIA GeForce GTX 1650",
       "memory_mb": 4095,
       "max_alloc_mb": 1023,
+      "local_mem_kb": 48,
+      "max_workgroup_size": 1024,
       "compute_units": 14,
+      "vector_width": 1,
+      "fp16_supported": false,
+      "unified_memory": false,
       "bandwidth_gbs": 128,
-      "dma_transfer_gbs": 11.5
+      "dma_transfer_gbs": 11.5,
+      "driver_version": "610.47",
+      "opencl_c_version": "OpenCL C 1.2 "
     },
     {
       "name": "Intel(R) UHD Graphics",
       "memory_mb": 6465,
       "max_alloc_mb": 3232,
+      "local_mem_kb": 64,
+      "max_workgroup_size": 256,
       "compute_units": 16,
+      "vector_width": 1,
+      "fp16_supported": true,
+      "unified_memory": true,
       "bandwidth_gbs": 25.6,
-      "dma_transfer_gbs": 25.6
+      "dma_transfer_gbs": 25.6,
+      "driver_version": "30.0.100.9864",
+      "opencl_c_version": "OpenCL C 1.2 "
     }
   ]
 }

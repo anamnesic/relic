@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(llm-on-legacy-gpus VERSION 0.1.0 LANGUAGES CXX)
+project(relic VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -23,6 +23,9 @@ add_executable(relic
     src/kv/kv_manager.cpp
     src/speculative/distributed_speculative.cpp
     src/backends/intel_uhd_backend.cpp
+    src/backends/kernel_registry.cpp
+    src/benchmark_suite.cpp
+    src/numerical_verifier.cpp
 )
 
 add_executable(relic_test
@@ -40,6 +43,8 @@ add_executable(relic_test
     src/kv/kv_manager.cpp
     src/speculative/distributed_speculative.cpp
     src/backends/intel_uhd_backend.cpp
+    src/backends/kernel_registry.cpp
+    src/numerical_verifier.cpp
 )
 target_include_directories(relic_test PRIVATE src ${OpenCL_INCLUDE_DIRS})
 target_link_libraries(relic_test PRIVATE ${OpenCL_LIBRARIES})

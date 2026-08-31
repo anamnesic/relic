@@ -3,17 +3,19 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <unordered_map>
 #include "backend.h"
 
-class IntelUhdBuffer : public BackendBuffer {
+class IntelUhdBuffer : public BackendBuffer
+{
 public:
     IntelUhdBuffer(cl_mem mem, size_t size, MemoryTier tier, void *host_ptr = nullptr);
     ~IntelUhdBuffer() override;
 
-    void* raw_handle() override { return (void*)mem_; }
+    void *raw_handle() override { return (void *)mem_; }
     size_t size() const override { return size_; }
     MemoryTier tier() const override { return tier_; }
-    void* host_ptr() const { return host_ptr_; }
+    void *host_ptr() const { return host_ptr_; }
 
     cl_mem mem() const { return mem_; }
 
@@ -24,12 +26,13 @@ private:
     void *host_ptr_;
 };
 
-class IntelUhdBackend : public Backend {
+class IntelUhdBackend : public Backend
+{
 public:
     IntelUhdBackend();
     ~IntelUhdBackend() override;
 
-    const std::string& name() const override { return name_; }
+    const std::string &name() const override { return name_; }
     BackendDeviceType type() const override { return BackendDeviceType::INTEL_IGPU; }
     bool initialize() override;
     DeviceStats query_stats() override;
@@ -58,4 +61,6 @@ private:
     cl_command_queue queue_;
     cl_program program_;
     bool initialized_;
+    std::unordered_map<std::string, cl_kernel> kernel_cache_;
+    cl_kernel get_kernel(const char *name);
 };

@@ -7,8 +7,10 @@
 #include <random>
 
 bool InferenceEngine::init(LlamaModel *m, Tokenizer *tok, OpenClBackend *backend,
-                            int64_t max_seq_limit) {
-    if (!m) return false;
+                           int64_t max_seq_limit)
+{
+    if (!m)
+        return false;
     model = m;
     tokenizer = tok;
     cl = backend;
@@ -16,13 +18,15 @@ bool InferenceEngine::init(LlamaModel *m, Tokenizer *tok, OpenClBackend *backend
     n_past = 0;
 
     decoder = create_decoder(model->architecture, cl);
-    if (!decoder) {
+    if (!decoder)
+    {
         fprintf(stderr, "No decoder adapter available for architecture: %s\n",
                 model->architecture.name.c_str());
         return false;
     }
 
-    if (!decoder->init(model->architecture, max_seq_len)) {
+    if (!decoder->init(model->architecture, max_seq_len))
+    {
         fprintf(stderr, "Failed to initialize decoder for architecture: %s\n",
                 model->architecture.name.c_str());
         return false;
@@ -33,38 +37,50 @@ bool InferenceEngine::init(LlamaModel *m, Tokenizer *tok, OpenClBackend *backend
     return true;
 }
 
-void InferenceEngine::free_buffers() {
-    if (decoder) decoder->reset();
+void InferenceEngine::free_buffers()
+{
+    if (decoder)
+        decoder->reset();
     n_past = 0;
 }
 
-int InferenceEngine::forward(int token_id, float *logits) {
-    if (!decoder || !model) return -1;
+int InferenceEngine::forward(int token_id, float *logits)
+{
+    if (!decoder || !model)
+        return -1;
     int res = decoder->forward(*model, token_id, n_past, logits);
-    if (res == 0) {
+    if (res == 0)
+    {
         n_past++;
     }
     return res;
 }
 
-std::vector<int> InferenceEngine::find_prompt_lookup_draft(const std::vector<int> &tokens, int ngram_len, int max_draft) {
+std::vector<int> InferenceEngine::find_prompt_lookup_draft(const std::vector<int> &tokens, int ngram_len, int max_draft)
+{
     std::vector<int> draft;
-    if ((int)tokens.size() < ngram_len + 1) return draft;
+    if ((int)tokens.size() < ngram_len + 1)
+        return draft;
 
     int n = (int)tokens.size();
     const int *cur_ngram = &tokens[n - ngram_len];
 
     // Search backwards in the context history for a matching n-gram
-    for (int i = n - ngram_len - 1; i >= ngram_len; i--) {
+    for (int i = n - ngram_len - 1; i >= ngram_len; i--)
+    {
         bool match = true;
-        for (int k = 0; k < ngram_len; k++) {
-            if (tokens[i - ngram_len + k] != cur_ngram[k]) {
+        for (int k = 0; k < ngram_len; k++)
+        {
+            if (tokens[i - ngram_len + k] != cur_ngram[k])
+            {
                 match = false;
                 break;
             }
         }
-        if (match) {
-            for (int d = 0; d < max_draft && (i + d) < (n - ngram_len); d++) {
+        if (match)
+        {
+            for (int d = 0; d < max_draft && (i + d) < (n - ngram_len); d++)
+            {
                 draft.push_back(tokens[i + d]);
             }
             break;
@@ -74,11 +90,14 @@ std::vector<int> InferenceEngine::find_prompt_lookup_draft(const std::vector<int
 }
 
 std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
-                                      float temperature, int top_k) {
-    if (!tokenizer || !model || !decoder) return "";
+                                      float temperature, int top_k)
+{
+    if (!tokenizer || !model || !decoder)
+        return "";
 
     std::vector<int> input_tokens = tokenizer->encode(prompt);
-    if (input_tokens.empty()) {
+    if (input_tokens.empty())
+    {
         fprintf(stderr, "Failed to tokenize prompt\n");
         return "";
     }
@@ -93,9 +112,11 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
     fprintf(stdout, "Prompt tokens: %zu\n", input_tokens.size());
     fflush(stdout);
 
-    for (size_t i = 0; i < input_tokens.size(); i++) {
+    for (size_t i = 0; i < input_tokens.size(); i++)
+    {
         float *l_ptr = (i + 1 == input_tokens.size()) ? logits.data() : nullptr;
-        if (forward(input_tokens[i], l_ptr) != 0) {
+        if (forward(input_tokens[i], l_ptr) != 0)
+        {
             fprintf(stderr, "Forward pass failed during prompt processing\n");
             fflush(stderr);
             return output;
@@ -110,7 +131,8 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
 
     fprintf(stdout, "\n[Benchmark] Prompt: %zu tokens in %.2f ms (%.2f tok/s)\n",
             input_tokens.size(), prompt_sec * 1000.0, prompt_speed);
-    if (enable_speculative) {
+    if (enable_speculative)
+    {
         fprintf(stdout, "[Speculation] Prompt-Lookup Speculative Decoding Active (N-gram=%d, DraftMax=%d)\n",
                 speculative_ngram, speculative_max_draft);
     }
@@ -122,41 +144,80 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
     int last_token = 0;
     auto t_gen_start = std::chrono::high_resolution_clock::now();
 
-    auto sample_token = [&](std::vector<float> &l_vec) -> int {
-        if (temperature < 0.01f) {
+    struct TopCandidate
+    {
+        float score;
+        int id;
+        bool operator>(const TopCandidate &o) const { return score > o.score; }
+    };
+
+    auto sample_token = [&](std::vector<float> &l_vec) -> int
+    {
+        if (temperature < 0.01f)
+        {
             return (int)(std::max_element(l_vec.begin(), l_vec.end()) - l_vec.begin());
         }
-        for (auto &l : l_vec) l /= temperature;
-        if (top_k > 0 && top_k < (int)l_vec.size()) {
-            std::vector<std::pair<float, int>> scored;
-            for (int j = 0; j < (int)l_vec.size(); j++)
-                scored.emplace_back(l_vec[j], j);
-            std::partial_sort(scored.begin(), scored.begin() + top_k, scored.end(),
-                              [](auto &a, auto &b) { return a.first > b.first; });
-            float threshold = scored[top_k - 1].first;
-            for (int j = 0; j < (int)l_vec.size(); j++)
-                if (l_vec[j] < threshold) l_vec[j] = -INFINITY;
+
+        int k_eff = (top_k > 0 && top_k < (int)l_vec.size()) ? top_k : 40;
+        std::vector<TopCandidate> min_heap;
+        min_heap.reserve((size_t)k_eff);
+
+        for (int j = 0; j < (int)l_vec.size(); j++)
+        {
+            float sc = l_vec[j] / temperature;
+            if ((int)min_heap.size() < k_eff)
+            {
+                min_heap.push_back({sc, j});
+                if ((int)min_heap.size() == k_eff)
+                {
+                    std::make_heap(min_heap.begin(), min_heap.end(), std::greater<TopCandidate>());
+                }
+            }
+            else if (sc > min_heap.front().score)
+            {
+                std::pop_heap(min_heap.begin(), min_heap.end(), std::greater<TopCandidate>());
+                min_heap.back() = {sc, j};
+                std::push_heap(min_heap.begin(), min_heap.end(), std::greater<TopCandidate>());
+            }
         }
-        float maxv = l_vec[0];
-        for (auto &l : l_vec) if (l > maxv) maxv = l;
+
+        float maxv = min_heap[0].score;
+        for (const auto &c : min_heap)
+            if (c.score > maxv)
+                maxv = c.score;
+
         float sum = 0.0f;
-        for (auto &l : l_vec) { l = expf(l - maxv); sum += l; }
-        float inv = 1.0f / sum;
-        for (auto &l : l_vec) l *= inv;
+        std::vector<float> probs(min_heap.size());
+        for (size_t i = 0; i < min_heap.size(); i++)
+        {
+            probs[i] = expf(min_heap[i].score - maxv);
+            sum += probs[i];
+        }
+        float inv = 1.0f / (sum > 0.0f ? sum : 1.0f);
+        for (auto &p : probs)
+            p *= inv;
+
         float r = (float)rng() / (float)rng.max();
         float cum = 0.0f;
-        int choice = (int)l_vec.size() - 1;
-        for (int j = 0; j < (int)l_vec.size(); j++) {
-            cum += l_vec[j];
-            if (r < cum) { choice = j; break; }
+        int choice = min_heap.back().id;
+        for (size_t i = 0; i < probs.size(); i++)
+        {
+            cum += probs[i];
+            if (r < cum)
+            {
+                choice = min_heap[i].id;
+                break;
+            }
         }
         return choice;
     };
 
-    while (generated_count < max_tokens) {
+    while (generated_count < max_tokens)
+    {
         last_token = sample_token(logits);
 
-        if (last_token == tokenizer->eos_id) break;
+        if (last_token == tokenizer->eos_id)
+            break;
         std::string piece = tokenizer->decode({last_token});
         output += piece;
         fprintf(stdout, "%s", piece.c_str());
@@ -164,29 +225,38 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
         all_tokens.push_back(last_token);
         generated_count++;
 
-        if (forward(last_token, logits.data()) != 0) {
+        if (forward(last_token, logits.data()) != 0)
+        {
             fprintf(stderr, "\nForward pass failed during token generation\n");
             break;
         }
 
         // Speculative decoding verification loop
-        if (enable_speculative && generated_count < max_tokens) {
+        if (enable_speculative && generated_count < max_tokens)
+        {
             std::vector<int> drafts = find_prompt_lookup_draft(all_tokens, speculative_ngram, speculative_max_draft);
-            for (int draft_tok : drafts) {
-                if (generated_count >= max_tokens) break;
+            for (int draft_tok : drafts)
+            {
+                if (generated_count >= max_tokens)
+                    break;
                 int target_pred = sample_token(logits);
-                if (target_pred == draft_tok) {
+                if (target_pred == draft_tok)
+                {
                     // Speculative draft accepted!
                     accepted_spec_tokens++;
-                    if (draft_tok == tokenizer->eos_id) break;
+                    if (draft_tok == tokenizer->eos_id)
+                        break;
                     std::string draft_piece = tokenizer->decode({draft_tok});
                     output += draft_piece;
                     fprintf(stdout, "%s", draft_piece.c_str());
                     fflush(stdout);
                     all_tokens.push_back(draft_tok);
                     generated_count++;
-                    if (forward(draft_tok, logits.data()) != 0) break;
-                } else {
+                    if (forward(draft_tok, logits.data()) != 0)
+                        break;
+                }
+                else
+                {
                     break;
                 }
             }
@@ -200,7 +270,8 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
 
     fprintf(stdout, "\n\n[Benchmark] Generation: %d tokens in %.2f ms (%.2f tok/s)",
             generated_count, gen_sec * 1000.0, gen_speed);
-    if (enable_speculative) {
+    if (enable_speculative)
+    {
         fprintf(stdout, " [Accepted Speculative: %d tokens]", accepted_spec_tokens);
     }
     fprintf(stdout, "\n[Benchmark] Total runtime: %.2f ms\n", total_sec * 1000.0);

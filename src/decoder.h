@@ -10,7 +10,8 @@ class OpenClBackend;
 
 // Hexagonal Port: ArchitectureDecoder
 // Abstract port defining the execution contract for any model architecture decoder.
-class ArchitectureDecoder {
+class ArchitectureDecoder
+{
 public:
     virtual ~ArchitectureDecoder() = default;
 
@@ -22,6 +23,21 @@ public:
 
     // Executes a forward pass for a single token at the specified sequence position.
     virtual int forward(const LlamaModel &model, int token_id, int64_t position, float *logits) = 0;
+
+    // Executes a batched forward pass for multiple tokens starting at start_position.
+    // logits_out must have space for token_ids.size() * model.n_vocab floats.
+    virtual int forward_batch(const LlamaModel &model, const std::vector<int> &token_ids, int64_t start_position, float *logits_out)
+    {
+        int64_t n_vocab = model.n_vocab;
+        for (size_t i = 0; i < token_ids.size(); i++)
+        {
+            float *cur_logits = logits_out ? (logits_out + i * (size_t)n_vocab) : nullptr;
+            int res = forward(model, token_ids[i], start_position + (int64_t)i, cur_logits);
+            if (res != 0)
+                return res;
+        }
+        return 0;
+    }
 
     // Optional pre-computation / GPU VRAM weight upload ahead of generation timing.
     virtual void warm_up(const LlamaModel &model) {}
