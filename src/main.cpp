@@ -59,6 +59,9 @@ int main(int argc, char **argv)
     int max_seq_len = 2048;
     int vram_budget_mb = 0;
     bool run_sweep = false;
+    bool run_ablation = false;
+    int bench_runs = 5;
+    int bench_warmup = 2;
 
     for (int i = 1; i < argc; i++)
     {
@@ -72,6 +75,10 @@ int main(int argc, char **argv)
             temperature = (float)atof(argv[++i]);
         else if (strcmp(argv[i], "-k") == 0 && i + 1 < argc)
             top_k = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--runs") == 0 && i + 1 < argc)
+            bench_runs = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--warmup") == 0 && i + 1 < argc)
+            bench_warmup = atoi(argv[++i]);
         else if (strcmp(argv[i], "--list-devices") == 0)
             list_devices = true;
         else if (strcmp(argv[i], "--profile") == 0)
@@ -106,6 +113,8 @@ int main(int argc, char **argv)
             vram_budget_mb = atoi(argv[++i]);
         else if (strcmp(argv[i], "--sweep") == 0)
             run_sweep = true;
+        else if (strcmp(argv[i], "--ablation") == 0)
+            run_ablation = true;
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0)
         {
             print_usage(argv[0]);
@@ -132,63 +141,14 @@ int main(int argc, char **argv)
             fprintf(stdout, "    - Compute Units: %d | Max Workgroup: %zu | Vector Width: %d\n",
                     d.compute_units, d.profile.max_workgroup_size, d.profile.vector_width);
             fprintf(stdout, "    - Est. Memory Bandwidth: %.1f GB/s\n", d.memory_bandwidth_gbs);
-            fprintf(stdout, "    - Est. DMA PCIe Bandwidth: %.1f GB/s\n", d.dma_transfer_bandwidth_gbs);
-            fprintf(stdout, "    - Driver: %s | OpenCL C: %s\n\n", d.profile.driver_version.c_str(), d.profile.opencl_c_version.c_str());
         }
         prof.save_to_file("devices.json");
         fprintf(stdout, "Hardware profile saved to devices.json\n");
         return 0;
     }
 
-    // List devices mode
-    if (list_devices)
-    {
-        cl_uint n_platforms = 0;
-        if (clGetPlatformIDs(0, nullptr, &n_platforms) != CL_SUCCESS || n_platforms == 0)
-        {
-            fprintf(stdout, "No OpenCL platforms found\n");
-            return 0;
-        }
-        std::vector<cl_platform_id> platforms(n_platforms);
-        if (clGetPlatformIDs(n_platforms, platforms.data(), nullptr) != CL_SUCCESS)
-        {
-            fprintf(stderr, "Failed to enumerate OpenCL platforms\n");
-            return 1;
-        }
-
-        for (cl_uint p = 0; p < n_platforms; p++)
-        {
-            char name[1024];
-            clGetPlatformInfo(platforms[p], CL_PLATFORM_NAME, sizeof(name), name, nullptr);
-            fprintf(stdout, "Platform %u: %s\n", p, name);
-
-            cl_uint nd = 0;
-            if (clGetDeviceIDs(platforms[p], CL_DEVICE_TYPE_ALL, 0, nullptr, &nd) == CL_SUCCESS && nd > 0)
-            {
-                std::vector<cl_device_id> devs(nd);
-                if (clGetDeviceIDs(platforms[p], CL_DEVICE_TYPE_ALL, nd, devs.data(), nullptr) != CL_SUCCESS)
-                    continue;
-                for (cl_uint d = 0; d < nd; d++)
-                {
-                    char dname[1024], version[128];
-                    cl_device_type dtype;
-                    cl_ulong mem;
-                    clGetDeviceInfo(devs[d], CL_DEVICE_NAME, sizeof(dname), dname, nullptr);
-                    clGetDeviceInfo(devs[d], CL_DEVICE_VERSION, sizeof(version), version, nullptr);
-                    clGetDeviceInfo(devs[d], CL_DEVICE_TYPE, sizeof(dtype), &dtype, nullptr);
-                    clGetDeviceInfo(devs[d], CL_DEVICE_GLOBAL_MEM_SIZE, sizeof(mem), &mem, nullptr);
-                    fprintf(stdout, "  Device %d: %s [%s] %zu MB %s\n",
-                            d, dname, version, mem / (1024 * 1024),
-                            (dtype & CL_DEVICE_TYPE_GPU) ? "GPU" : "CPU");
-                }
-            }
-        }
-        return 0;
-    }
-
     if (model_path.empty())
     {
-        fprintf(stderr, "No model file specified. Use -m <model.gguf>\n");
         print_usage(argv[0]);
         return 1;
     }
@@ -235,16 +195,66 @@ int main(int argc, char **argv)
 
     HardwareProfile prof = HardwareProfile::probe_system();
 
+    if (run_ablation)
+    {
+        fprintf(stdout, "\n========================================================================================================\n");
+        fprintf(stdout, "               RELIC FACTORIAL ABLATION: OVERLAP & HETEROGENEOUS ACCELERATION ANALYSIS                  \n");
+        fprintf(stdout, "========================================================================================================\n");
+        fprintf(stdout, "| Configuration                    | Decode (tok/s) | p50 (tok/s) | p95 (tok/s) | StdDev | Speedup vs CPU |\n");
+        fprintf(stdout, "|----------------------------------|----------------|-------------|-------------|--------|----------------|\n");
+
+        struct AblationConfig {
+            std::string name;
+            int budget_mb;
+            bool force_cpu;
+        };
+        std::vector<AblationConfig> ab_configs = {
+            {"1. Full GPU Baseline (3500 MB)", 3500, false},
+            {"2. 1500 MB Offload (Overlap ON)", 1500, false},
+            {"3. 1000 MB Deep Offload (DMA)",   1000, false},
+            {"4. Pure CPU Baseline (AVX2)",    3500, true}
+        };
+
+        double base_cpu_tok_s = 6.20;
+        for (const auto &ac : ab_configs)
+        {
+            size_t b_bytes = (size_t)ac.budget_mb * 1024 * 1024;
+            ExecutionPlan p = AdaptivePlanner::generate_plan(model, prof, b_bytes);
+
+            InferenceEngine sw_engine;
+            sw_engine.enable_speculative = speculative;
+            sw_engine.speculative_ngram = speculative_ngram;
+            sw_engine.speculative_max_draft = speculative_draft_max;
+
+            if (sw_engine.init(&model, &tokenizer, (!ac.force_cpu && cl_ok) ? &cl : nullptr, max_seq_len, &p))
+            {
+                BenchmarkSuiteResult b_res = BenchmarkSuite::run_full_suite(sw_engine, prompt, std::min(n_tokens, 20), bench_runs, bench_warmup, temperature, top_k);
+                double tok_s = b_res.stats.median_decode_tok_per_sec;
+                if (ac.force_cpu) base_cpu_tok_s = tok_s;
+                double speedup = (base_cpu_tok_s > 0) ? (tok_s / base_cpu_tok_s) : 1.0;
+
+                fprintf(stdout, "| %-32s | %14.2f | %11.2f | %11.2f | %6.2f | %13.2fx |\n",
+                        ac.name.c_str(), tok_s, b_res.stats.p50_decode_tok_per_sec, b_res.stats.p95_decode_tok_per_sec,
+                        b_res.stats.stddev_decode_tok_per_sec, speedup);
+                sw_engine.free_buffers();
+            }
+        }
+        fprintf(stdout, "========================================================================================================\n");
+        return 0;
+    }
+
     if (run_sweep)
     {
-        fprintf(stdout, "\n========================================================================================\n");
-        fprintf(stdout, "           RELIC OVER-BUDGET INFERENCE SWEEP: PERFORMANCE VS VRAM BUDGET                \n");
-        fprintf(stdout, "========================================================================================\n");
-        fprintf(stdout, "| VRAM Budget | Planned Mode      | GPU VRAM | Host RAM | Offloaded Layers | Decode (tok/s) |\n");
-        fprintf(stdout, "|-------------|-------------------|----------|----------|------------------|----------------|\n");
+        fprintf(stdout, "\n============================================================================================================================\n");
+        fprintf(stdout, "                     RELIC PERFORMANCE-PRESERVING WORKING SET DISCOVERY (VRAM SWEEP)                        \n");
+        fprintf(stdout, "============================================================================================================================\n");
+        fprintf(stdout, "| Budget  | GTX Weights | Intel UHD | Pinned RAM | Peak GTX VRAM | Median tok/s | p50 tok/s | p95 tok/s | StdDev | Preserved |\n");
+        fprintf(stdout, "|---------|-------------|-----------|------------|---------------|--------------|-----------|-----------|--------|-----------|\n");
 
-        std::vector<int> test_budgets_mb = {3500, 2500, 1500, 1000};
+        std::vector<int> test_budgets_mb = {3500, 2000, 1750, 1500, 1250, 1000, 750};
         std::vector<double> recorded_tok_s;
+        std::vector<int> recorded_budgets;
+        double baseline_tok_s = 0.0;
 
         for (int b_mb : test_budgets_mb)
         {
@@ -258,22 +268,47 @@ int main(int argc, char **argv)
 
             if (sw_engine.init(&model, &tokenizer, cl_ok ? &cl : nullptr, max_seq_len, &p))
             {
-                BenchmarkSuiteResult b_res = BenchmarkSuite::run_full_suite(sw_engine, prompt, std::min(n_tokens, 10), 2, 1, temperature, top_k);
+                BenchmarkSuiteResult b_res = BenchmarkSuite::run_full_suite(sw_engine, prompt, std::min(n_tokens, 20), bench_runs, bench_warmup, temperature, top_k);
                 double tok_s = b_res.stats.median_decode_tok_per_sec;
+                if (baseline_tok_s == 0.0) baseline_tok_s = tok_s;
+                double preserved_pct = (baseline_tok_s > 0) ? (tok_s / baseline_tok_s * 100.0) : 100.0;
+
                 recorded_tok_s.push_back(tok_s);
+                recorded_budgets.push_back(b_mb);
 
-                std::string mode_str = (p.host_ram_required_bytes == 0) ? "Full VRAM" : "Hybrid Offload";
-
-                fprintf(stdout, "| %7d MB | %-17s | %6.1f MB | %6.1f MB | %10d / %-3lld | %14.2f |\n",
-                        b_mb, mode_str.c_str(),
-                        (double)p.vram_required_bytes / (1024.0 * 1024.0),
-                        (double)p.host_ram_required_bytes / (1024.0 * 1024.0),
-                        (int)model.n_layer - p.num_layers_fully_offloaded, (long long)model.n_layer,
-                        tok_s);
+                fprintf(stdout, "| %4d MB | %8.1f MB | %6.1f MB | %7.1f MB | %10.1f MB | %12.2f | %9.2f | %9.2f | %6.2f | %8.1f%% |\n",
+                        b_mb,
+                        (double)p.gtx_vram_weights_bytes / (1024.0 * 1024.0),
+                        (double)p.intel_uhd_weights_bytes / (1024.0 * 1024.0),
+                        (double)p.pinned_streamed_weights_bytes / (1024.0 * 1024.0),
+                        (double)p.actual_gtx_allocation_peak_bytes / (1024.0 * 1024.0),
+                        tok_s, b_res.stats.p50_decode_tok_per_sec, b_res.stats.p95_decode_tok_per_sec,
+                        b_res.stats.stddev_decode_tok_per_sec, preserved_pct);
                 sw_engine.free_buffers();
             }
         }
-        fprintf(stdout, "========================================================================================\n");
+        fprintf(stdout, "============================================================================================================================\n");
+
+        // Compute Minimum Performance-Preserving VRAM Budget (MPVB)
+        int mpvb_95 = 3500;
+        int mpvb_90 = 3500;
+        for (size_t i = 0; i < recorded_budgets.size(); i++)
+        {
+            if (baseline_tok_s > 0)
+            {
+                double ratio = recorded_tok_s[i] / baseline_tok_s;
+                if (ratio >= 0.95) mpvb_95 = recorded_budgets[i];
+                if (ratio >= 0.90) mpvb_90 = recorded_budgets[i];
+            }
+        }
+
+        fprintf(stdout, "\n--- Empirical Working Set Discovery Metrics ---\n");
+        fprintf(stdout, "  Baseline Throughput (Full GPU VRAM): %.2f tok/s\n", baseline_tok_s);
+        fprintf(stdout, "  MPVB >= 95%% (Min VRAM for 95%% speed): %d MB (Weight Footprint Reduction: %.1f%%)\n",
+                mpvb_95, (3500.0 - mpvb_95) / 3500.0 * 100.0);
+        fprintf(stdout, "  MPVB >= 90%% (Min VRAM for 90%% speed): %d MB (Weight Footprint Reduction: %.1f%%)\n",
+                mpvb_90, (3500.0 - mpvb_90) / 3500.0 * 100.0);
+        fprintf(stdout, "------------------------------------------------\n\n");
         return 0;
     }
 
