@@ -423,7 +423,7 @@ void OpenClBackend::gemv_q4_0(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t N
     clSetKernelArg(knl.kernel, 4, sizeof(cl_int), &k);
 
     size_t local = 32;
-    size_t n_groups = ((size_t)N + 7) / 8;
+    size_t n_groups = ((size_t)N + 15) / 16;
     size_t global = n_groups * local;
     CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr), "gemv_q4_0");
 }
@@ -546,4 +546,40 @@ void OpenClBackend::qwen_attention_step(ClBuffer &q_buf, ClBuffer &k_buf, ClBuff
     size_t local = (size_t)head_dim;
     size_t global = (size_t)n_head * local;
     CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr), "qwen_full_attention_step");
+}
+
+void OpenClBackend::argmax(ClBuffer &out_idx, ClBuffer &logits, int64_t n) {
+    static ClKernel knl;
+    if (!knl.kernel) {
+        build_kernel(knl, caicos_kernel_source, "argmax_f32");
+    }
+
+    clSetKernelArg(knl.kernel, 0, sizeof(cl_mem), &logits.mem);
+    clSetKernelArg(knl.kernel, 1, sizeof(cl_mem), &out_idx.mem);
+    cl_int nn = (cl_int)n;
+    clSetKernelArg(knl.kernel, 2, sizeof(cl_int), &nn);
+
+    size_t local = 256;
+    size_t global = 256;
+    CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr), "argmax_f32");
+}
+
+void OpenClBackend::embed_lookup(ClBuffer &hidden, ClBuffer &embd_table, int token_id, int64_t n_embd) {
+    static ClKernel knl;
+    if (!knl.kernel) {
+        build_kernel(knl, caicos_kernel_source, "embed_lookup_q4_0");
+    }
+
+    clSetKernelArg(knl.kernel, 0, sizeof(cl_mem), &hidden.mem);
+    clSetKernelArg(knl.kernel, 1, sizeof(cl_mem), &embd_table.mem);
+    cl_int tok = (cl_int)token_id, ne = (cl_int)n_embd;
+    clSetKernelArg(knl.kernel, 2, sizeof(cl_int), &tok);
+    clSetKernelArg(knl.kernel, 3, sizeof(cl_int), &ne);
+
+    size_t local = 64;
+    size_t global = (size_t)(n_embd / 4);
+    if (global % local != 0) {
+        global = ((global + local - 1) / local) * local;
+    }
+    CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr), "embed_lookup_q4_0");
 }

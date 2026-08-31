@@ -25,6 +25,36 @@ inline float fp16_to_fp32(ushort h) {
 }
 
 //------------------------------------------------------------------------------
+// GPU Embedding Lookup (128-bit SIMD in VRAM)
+//------------------------------------------------------------------------------
+kernel void embed_lookup_q4_0(
+    global float *hidden,
+    global const uchar *embd_table,
+    int token_id,
+    int n_embd
+) {
+    int i = get_global_id(0); // Vector index [0 .. n_embd/4 - 1]
+    int n_blocks = n_embd / 32;
+    int blk_idx = i / 8;
+    int in_blk_vec = i % 8; // [0 .. 7]
+
+    global const uchar *row_ptr = embd_table + (size_t)token_id * (size_t)(n_blocks * 18);
+    global const uchar *b_blk = row_ptr + (size_t)blk_idx * 18;
+    float d = fp16_to_fp32((ushort)b_blk[0] | ((ushort)b_blk[1] << 8));
+    global const uchar *qs = b_blk + 2;
+
+    if (in_blk_vec < 4) {
+        uchar4 qb = vload4(in_blk_vec, qs);
+        float4 v_lo = (convert_float4(qb & (uchar4)0x0F) - (float4)8.0f) * d;
+        vstore4(v_lo, i, hidden);
+    } else {
+        uchar4 qb = vload4(in_blk_vec - 4, qs);
+        float4 v_hi = (convert_float4(qb >> (uchar4)4) - (float4)8.0f) * d;
+        vstore4(v_hi, i, hidden);
+    }
+}
+
+//------------------------------------------------------------------------------
 // Vectorized RMS Norm (128-bit SIMD)
 //------------------------------------------------------------------------------
 kernel void rms_norm_f32(
@@ -272,7 +302,7 @@ kernel void gemv_q8_0(
 }
 
 //------------------------------------------------------------------------------
-// MULTI-ROW 8x GEMV Q4_0: Computes 8 rows per warp with 8x Activation Reuse!
+// MULTI-ROW 16x GEMV Q4_0: Computes 16 rows per warp with 16x Activation Reuse!
 //------------------------------------------------------------------------------
 kernel void gemv_q4_0(
     global const float *a,
@@ -281,27 +311,28 @@ kernel void gemv_q4_0(
     int N,
     int K
 ) {
-    local float l_sum[8][32];
+    local float l_sum[16][32];
 
-    int base_row = get_group_id(0) * 8;
+    int base_row = get_group_id(0) * 16;
     int tid = get_local_id(0);
     int wg_size = get_local_size(0);
 
     int n_blocks = K / 32;
-    global const uchar *row_ptrs[8];
-    for (int r = 0; r < 8; r++) {
+    global const uchar *row_ptrs[16];
+    for (int r = 0; r < 16; r++) {
         int row = base_row + r;
         row_ptrs[r] = (row < N) ? (b + (size_t)row * (size_t)(n_blocks * 18)) : b;
     }
 
-    float sums[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float sums[16] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                      0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 
     for (int blk = tid; blk < n_blocks; blk += wg_size) {
         global const float *a_blk = a + blk * 32;
 
-        float d[8];
-        global const uchar *qs[8];
-        for (int r = 0; r < 8; r++) {
+        float d[16];
+        global const uchar *qs[16];
+        for (int r = 0; r < 16; r++) {
             global const uchar *b_blk = row_ptrs[r] + (size_t)blk * 18;
             d[r] = fp16_to_fp32((ushort)b_blk[0] | ((ushort)b_blk[1] << 8));
             qs[r] = b_blk + 2;
@@ -311,7 +342,7 @@ kernel void gemv_q4_0(
             float4 a_lo = vload4(i, a_blk);
             float4 a_hi = vload4(i + 4, a_blk);
 
-            for (int r = 0; r < 8; r++) {
+            for (int r = 0; r < 16; r++) {
                 uchar4 qb = vload4(i, qs[r]);
                 float4 v_lo = (convert_float4(qb & (uchar4)0x0F) - (float4)8.0f) * d[r];
                 float4 v_hi = (convert_float4(qb >> (uchar4)4)   - (float4)8.0f) * d[r];
@@ -320,30 +351,30 @@ kernel void gemv_q4_0(
         }
     }
 
-    for (int r = 0; r < 8; r++) {
+    for (int r = 0; r < 16; r++) {
         l_sum[r][tid] = sums[r];
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
     if (tid < 16) {
-        for (int r = 0; r < 8; r++) l_sum[r][tid] += l_sum[r][tid + 16];
+        for (int r = 0; r < 16; r++) l_sum[r][tid] += l_sum[r][tid + 16];
     }
     barrier(CLK_LOCAL_MEM_FENCE);
     if (tid < 8) {
-        for (int r = 0; r < 8; r++) l_sum[r][tid] += l_sum[r][tid + 8];
+        for (int r = 0; r < 16; r++) l_sum[r][tid] += l_sum[r][tid + 8];
     }
     barrier(CLK_LOCAL_MEM_FENCE);
     if (tid < 4) {
-        for (int r = 0; r < 8; r++) l_sum[r][tid] += l_sum[r][tid + 4];
+        for (int r = 0; r < 16; r++) l_sum[r][tid] += l_sum[r][tid + 4];
     }
     barrier(CLK_LOCAL_MEM_FENCE);
     if (tid < 2) {
-        for (int r = 0; r < 8; r++) l_sum[r][tid] += l_sum[r][tid + 2];
+        for (int r = 0; r < 16; r++) l_sum[r][tid] += l_sum[r][tid + 2];
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
     if (tid == 0) {
-        for (int r = 0; r < 8; r++) {
+        for (int r = 0; r < 16; r++) {
             if (base_row + r < N) {
                 dst[base_row + r] = l_sum[r][0] + l_sum[r][1];
             }
@@ -353,7 +384,6 @@ kernel void gemv_q4_0(
 
 //------------------------------------------------------------------------------
 // FUSED FFN: Multi-Row 8x GEMV (Gate + Up) + SiLU + Mul in 1 Kernel Launch
-// Reads input 'a' once, computes Gate & Up simultaneously, applies SwiGLU in registers!
 //------------------------------------------------------------------------------
 kernel void gemv_q4_0_ffn_swiglu(
     global const float *a,          // [K = 2048]
@@ -480,6 +510,93 @@ kernel void swiglu_f32(
     float4 u = vload4(i, up);
     float4 silu_g = g / ((float4)(1.0f) + exp(-g));
     vstore4(silu_g * u, i, out);
+}
+
+//------------------------------------------------------------------------------
+// GPU Parallel ArgMax: Reduces N floats to 1 max token index
+// Dispatched with: Global = 256, Local = 256
+//------------------------------------------------------------------------------
+kernel void argmax_f32(
+    global const float *logits,
+    global int *out_idx,
+    int N
+) {
+    local float l_max[256];
+    local int l_idx[256];
+
+    int tid = get_local_id(0);
+    int wg_size = get_local_size(0);
+
+    float max_val = -INFINITY;
+    int max_idx = 0;
+
+    for (int i = tid; i < N; i += wg_size) {
+        float val = logits[i];
+        if (val > max_val) {
+            max_val = val;
+            max_idx = i;
+        }
+    }
+
+    l_max[tid] = max_val;
+    l_idx[tid] = max_idx;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    if (tid < 128) {
+        if (l_max[tid + 128] > l_max[tid]) {
+            l_max[tid] = l_max[tid + 128];
+            l_idx[tid] = l_idx[tid + 128];
+        }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (tid < 64) {
+        if (l_max[tid + 64] > l_max[tid]) {
+            l_max[tid] = l_max[tid + 64];
+            l_idx[tid] = l_idx[tid + 64];
+        }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (tid < 32) {
+        if (l_max[tid + 32] > l_max[tid]) {
+            l_max[tid] = l_max[tid + 32];
+            l_idx[tid] = l_idx[tid + 32];
+        }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (tid < 16) {
+        if (l_max[tid + 16] > l_max[tid]) {
+            l_max[tid] = l_max[tid + 16];
+            l_idx[tid] = l_idx[tid + 16];
+        }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (tid < 8) {
+        if (l_max[tid + 8] > l_max[tid]) {
+            l_max[tid] = l_max[tid + 8];
+            l_idx[tid] = l_idx[tid + 8];
+        }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (tid < 4) {
+        if (l_max[tid + 4] > l_max[tid]) {
+            l_max[tid] = l_max[tid + 4];
+            l_idx[tid] = l_idx[tid + 4];
+        }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (tid < 2) {
+        if (l_max[tid + 2] > l_max[tid]) {
+            l_max[tid] = l_max[tid + 2];
+            l_idx[tid] = l_idx[tid + 2];
+        }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    if (tid == 0) {
+        int best_idx = l_idx[0];
+        if (l_max[1] > l_max[0]) best_idx = l_idx[1];
+        *out_idx = best_idx;
+    }
 }
 
 //------------------------------------------------------------------------------

@@ -532,15 +532,23 @@ public:
         }
 
         const auto &embed = emb_it->second;
-        if (embed.type == GgmlType::F32) {
-            const float *emb_data = (const float *)embed.data.data();
-            memcpy(hidden, emb_data + token_id * n_embd, (size_t)(n_embd * sizeof(float)));
-        } else {
-            model.dequantize_rows_to_f32(embed, token_id, 1, hidden);
-        }
 
         if (use_gpu && cl && cl->initialized) {
-            clEnqueueWriteBuffer(cl->dev.queue, gpu_hidden.mem, CL_FALSE, 0, (size_t)(n_embd * sizeof(float)), hidden, 0, nullptr, nullptr);
+            std::string emb_name = (emb_it->first == "token_embd.weight") ? "token_embd.weight" : "tok_embeddings.weight";
+            ClBuffer *emb_buf = gpu_store.get(emb_name);
+            GgmlType emb_type = gpu_store.get_type(emb_name, embed.type);
+            if (emb_buf && emb_type == GgmlType::Q4_0) {
+                // Pure In-VRAM GPU Embedding Lookup (Zero CPU overhead & Zero PCIe writes)
+                cl->embed_lookup(gpu_hidden, *emb_buf, token_id, n_embd);
+            } else {
+                if (embed.type == GgmlType::F32) {
+                    const float *emb_data = (const float *)embed.data.data();
+                    memcpy(hidden, emb_data + token_id * n_embd, (size_t)(n_embd * sizeof(float)));
+                } else {
+                    model.dequantize_rows_to_f32(embed, token_id, 1, hidden);
+                }
+                clEnqueueWriteBuffer(cl->dev.queue, gpu_hidden.mem, CL_FALSE, 0, (size_t)(n_embd * sizeof(float)), hidden, 0, nullptr, nullptr);
+            }
 
             for (int64_t layer = 0; layer < arch.n_layer; layer++) {
                 std::string prefix = "blk." + std::to_string(layer) + ".";

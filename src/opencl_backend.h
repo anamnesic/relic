@@ -163,6 +163,8 @@ public:
     void mul(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t n);
     void copy(ClBuffer &dst, ClBuffer &src, int64_t n);
     void fill(ClBuffer &buf, float val, int64_t n);
+    void argmax(ClBuffer &out_idx, ClBuffer &logits, int64_t n);
+    void embed_lookup(ClBuffer &hidden, ClBuffer &embd_table, int token_id, int64_t n_embd);
 };
 
 struct GpuTensorStore {
