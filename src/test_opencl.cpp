@@ -5,6 +5,7 @@
 #include "planner/adaptive_planner.h"
 #include "memory/pinned_host_pool.h"
 #include "memory/async_prefetcher.h"
+#include "speculative/distributed_speculative.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -321,6 +322,14 @@ int main(int argc, char **argv) {
     }
     fprintf(stdout, "  AsyncPrefetcher non-blocking DMA transfer & wait: %s\n", prefetch_pass ? "PASS" : "FAIL");
     pass &= prefetch_pass;
+
+    // Phase 3 Distributed Speculative Engine Tests
+    fprintf(stdout, "\nRunning Phase 3 Distributed Speculative tests...\n");
+    DistributedSpeculativeEngine dist_spec(nullptr, nullptr, nullptr, nullptr, nullptr);
+    SpeculativeResult spec_res = dist_spec.step_speculation({1, 2, 3}, 4);
+    bool spec_pass = (spec_res.num_drafted == 0 && spec_res.accepted_tokens.empty());
+    fprintf(stdout, "  DistributedSpeculativeEngine safe fallback: %s\n", spec_pass ? "PASS" : "FAIL");
+    pass &= spec_pass;
 
     // Device info summary
     fprintf(stdout, "\n=== Device Summary ===\n");
