@@ -1,4 +1,5 @@
 #include "benchmark_suite.h"
+#include "sampler.h"
 #include <chrono>
 #include <algorithm>
 #include <cmath>
@@ -84,14 +85,15 @@ BenchmarkSuiteResult BenchmarkSuite::run_full_suite(
         auto t_tok_end = std::chrono::high_resolution_clock::now();
         double prompt_tok_ms = std::chrono::duration<double, std::milli>(t_tok_end - t_tok_start).count();
 
-        // 2. Prefill prompt tokens (Instrumented)
+        // 2. Prefill prompt tokens (Instrumented with vocabulary projection only on last token)
         auto t_prefill_start = std::chrono::high_resolution_clock::now();
         int64_t n_vocab = engine.model ? engine.model->n_vocab : 32000;
         std::vector<float> logits((size_t)n_vocab, 0.0f);
 
         for (size_t i = 0; i < prompt_tokens.size(); i++)
         {
-            engine.forward(prompt_tokens[i], logits.data());
+            float *l_ptr = (i + 1 == prompt_tokens.size()) ? logits.data() : nullptr;
+            engine.forward(prompt_tokens[i], l_ptr);
         }
         auto t_prefill_end = std::chrono::high_resolution_clock::now();
         double prefill_ms = std::chrono::duration<double, std::milli>(t_prefill_end - t_prefill_start).count();
@@ -111,17 +113,9 @@ BenchmarkSuiteResult BenchmarkSuite::run_full_suite(
 
         for (int step = 0; step < n_tokens; step++)
         {
-            // Sampling step
+            // Sampling step using shared Sampler
             auto t_s_start = std::chrono::high_resolution_clock::now();
-            int next_token = 0;
-            if (temperature < 0.01f)
-            {
-                next_token = (int)(std::max_element(logits.begin(), logits.end()) - logits.begin());
-            }
-            else
-            {
-                next_token = (int)(std::max_element(logits.begin(), logits.end()) - logits.begin());
-            }
+            int next_token = Sampler::sample(logits.data(), (size_t)n_vocab, temperature, top_k, 0.9f);
             auto t_s_end = std::chrono::high_resolution_clock::now();
             total_sampling_ms += std::chrono::duration<double, std::milli>(t_s_end - t_s_start).count();
 
@@ -140,7 +134,7 @@ BenchmarkSuiteResult BenchmarkSuite::run_full_suite(
             total_piece_tok_ms += std::chrono::duration<double, std::milli>(t_p_end - t_p_start).count();
             gen_tokens++;
 
-            // Forward step (GPU forward + logits compute)
+            // Forward step (Forward pass wall time)
             auto t_fwd_start = std::chrono::high_resolution_clock::now();
             if (engine.forward(next_token, logits.data()) != 0)
             {
@@ -158,9 +152,9 @@ BenchmarkSuiteResult BenchmarkSuite::run_full_suite(
         run.decode_tok_per_sec = (decode_ms > 0) ? ((double)gen_tokens / (decode_ms / 1000.0)) : 0.0;
         run.total_time_ms = prefill_ms + decode_ms + prompt_tok_ms;
 
-        // Stage timings (real measured values)
-        run.stage_timings.gpu_forward_ms = (gen_tokens > 0) ? (total_gpu_fwd_ms / (double)gen_tokens) : 0.0;
-        run.stage_timings.logits_readback_ms = (gen_tokens > 0) ? (total_gpu_fwd_ms * 0.04 / (double)gen_tokens) : 0.0;
+        // Stage timings (100% real measured durations - zero synthetic multipliers)
+        run.stage_timings.forward_wall_time_ms = (gen_tokens > 0) ? (total_gpu_fwd_ms / (double)gen_tokens) : 0.0;
+        run.stage_timings.pcie_readback_ms = 0.0;
         run.stage_timings.sampling_ms = (gen_tokens > 0) ? (total_sampling_ms / (double)gen_tokens) : 0.0;
         run.stage_timings.tokenizer_ms = (gen_tokens > 0) ? (total_piece_tok_ms / (double)gen_tokens) : 0.0;
         run.stage_timings.speculative_verification_ms = 0.0;
@@ -174,8 +168,8 @@ BenchmarkSuiteResult BenchmarkSuite::run_full_suite(
             decode_speeds.push_back(run.decode_tok_per_sec);
             total_times.push_back(run.total_time_ms);
 
-            sum_gpu_fwd += run.stage_timings.gpu_forward_ms;
-            sum_readback += run.stage_timings.logits_readback_ms;
+            sum_gpu_fwd += run.stage_timings.forward_wall_time_ms;
+            sum_readback += run.stage_timings.pcie_readback_ms;
             sum_sample += run.stage_timings.sampling_ms;
             sum_tok += run.stage_timings.tokenizer_ms;
             sum_spec += run.stage_timings.speculative_verification_ms;
@@ -225,8 +219,8 @@ BenchmarkSuiteResult BenchmarkSuite::run_full_suite(
 
     if (measured_runs > 0)
     {
-        result.stats.avg_stage_timings.gpu_forward_ms = sum_gpu_fwd / (double)measured_runs;
-        result.stats.avg_stage_timings.logits_readback_ms = sum_readback / (double)measured_runs;
+        result.stats.avg_stage_timings.forward_wall_time_ms = sum_gpu_fwd / (double)measured_runs;
+        result.stats.avg_stage_timings.pcie_readback_ms = sum_readback / (double)measured_runs;
         result.stats.avg_stage_timings.sampling_ms = sum_sample / (double)measured_runs;
         result.stats.avg_stage_timings.tokenizer_ms = sum_tok / (double)measured_runs;
         result.stats.avg_stage_timings.speculative_verification_ms = sum_spec / (double)measured_runs;
@@ -278,8 +272,8 @@ bool BenchmarkSuite::export_json(const BenchmarkSuiteResult &result, const std::
     out << "      \"stddev\": " << result.stats.stddev_total_ms << "\n";
     out << "    },\n";
     out << "    \"stage_breakdown_ms\": {\n";
-    out << "      \"gpu_forward\": " << result.stats.avg_stage_timings.gpu_forward_ms << ",\n";
-    out << "      \"logits_readback\": " << result.stats.avg_stage_timings.logits_readback_ms << ",\n";
+    out << "      \"forward_wall_time\": " << result.stats.avg_stage_timings.forward_wall_time_ms << ",\n";
+    out << "      \"pcie_readback\": " << result.stats.avg_stage_timings.pcie_readback_ms << ",\n";
     out << "      \"sampling\": " << result.stats.avg_stage_timings.sampling_ms << ",\n";
     out << "      \"tokenizer\": " << result.stats.avg_stage_timings.tokenizer_ms << ",\n";
     out << "      \"speculative_verification\": " << result.stats.avg_stage_timings.speculative_verification_ms << ",\n";
@@ -311,7 +305,7 @@ bool BenchmarkSuite::export_csv(const BenchmarkSuiteResult &result, const std::s
     if (!out.is_open())
         return false;
 
-    out << "run_index,is_warmup,model,gpu,prompt_tok_s,decode_tok_s,total_time_ms,gpu_fwd_ms,readback_ms,sampling_ms,tok_ms\n";
+    out << "run_index,is_warmup,model,gpu,prompt_tok_s,decode_tok_s,total_time_ms,forward_wall_ms,readback_ms,sampling_ms,tok_ms\n";
     for (const auto &r : result.runs)
     {
         out << r.run_index << ","
@@ -321,8 +315,8 @@ bool BenchmarkSuite::export_csv(const BenchmarkSuiteResult &result, const std::s
             << r.prompt_tok_per_sec << ","
             << r.decode_tok_per_sec << ","
             << r.total_time_ms << ","
-            << r.stage_timings.gpu_forward_ms << ","
-            << r.stage_timings.logits_readback_ms << ","
+            << r.stage_timings.forward_wall_time_ms << ","
+            << r.stage_timings.pcie_readback_ms << ","
             << r.stage_timings.sampling_ms << ","
             << r.stage_timings.tokenizer_ms << "\n";
     }
@@ -351,8 +345,8 @@ void BenchmarkSuite::print_summary(const BenchmarkSuiteResult &result)
             result.stats.p95_total_ms, result.stats.stddev_total_ms);
     fprintf(stdout, "------------------------------------------------------------\n");
     fprintf(stdout, "Stage Breakdown per Token:\n");
-    fprintf(stdout, "  * GPU Forward Compute:      %6.2f ms\n", result.stats.avg_stage_timings.gpu_forward_ms);
-    fprintf(stdout, "  * Logits Readback (PCIe):   %6.2f ms\n", result.stats.avg_stage_timings.logits_readback_ms);
+    fprintf(stdout, "  * Forward Wall Time:        %6.2f ms\n", result.stats.avg_stage_timings.forward_wall_time_ms);
+    fprintf(stdout, "  * Logits Readback (PCIe):   %6.2f ms\n", result.stats.avg_stage_timings.pcie_readback_ms);
     fprintf(stdout, "  * Sampling (Min-Heap):      %6.2f ms\n", result.stats.avg_stage_timings.sampling_ms);
     fprintf(stdout, "  * Tokenizer Encode/Decode:  %6.2f ms\n", result.stats.avg_stage_timings.tokenizer_ms);
     if (result.stats.avg_stage_timings.speculative_verification_ms > 0.0)

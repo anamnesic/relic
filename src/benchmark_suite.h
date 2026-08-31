@@ -5,16 +5,18 @@
 #include "inference.h"
 #include "planner/hardware_profile.h"
 
-struct StageTimings {
-    double gpu_forward_ms = 0.0;
-    double logits_readback_ms = 0.0;
-    double sampling_ms = 0.0;
-    double tokenizer_ms = 0.0;
+struct StageTimings
+{
+    double forward_wall_time_ms = 0.0; // Measured forward pass wall-clock duration per token
+    double pcie_readback_ms = 0.0;     // Logits readback duration
+    double sampling_ms = 0.0;          // Sampler (top-k / min-heap / greedy) duration
+    double tokenizer_ms = 0.0;         // Piece decode / tokenizer duration
     double speculative_verification_ms = 0.0;
     double total_per_token_ms = 0.0;
 };
 
-struct BenchmarkRunResult {
+struct BenchmarkRunResult
+{
     int run_index = 0;
     bool is_warmup = false;
     double cold_start_ms = 0.0;
@@ -28,7 +30,8 @@ struct BenchmarkRunResult {
     StageTimings stage_timings;
 };
 
-struct BenchmarkSummaryStats {
+struct BenchmarkSummaryStats
+{
     double median_decode_tok_per_sec = 0.0;
     double p50_decode_tok_per_sec = 0.0;
     double p95_decode_tok_per_sec = 0.0;
@@ -47,7 +50,8 @@ struct BenchmarkSummaryStats {
     StageTimings avg_stage_timings;
 };
 
-struct BenchmarkMetadata {
+struct BenchmarkMetadata
+{
     std::string model_name;
     std::string quantization;
     size_t context_length = 2048;
@@ -61,13 +65,15 @@ struct BenchmarkMetadata {
     std::string execution_device_config = "GTX 1650 + Intel UHD + CPU (Heterogeneous)";
 };
 
-struct BenchmarkSuiteResult {
+struct BenchmarkSuiteResult
+{
     BenchmarkMetadata metadata;
     std::vector<BenchmarkRunResult> runs;
     BenchmarkSummaryStats stats;
 };
 
-class BenchmarkSuite {
+class BenchmarkSuite
+{
 public:
     static BenchmarkSuiteResult run_full_suite(
         InferenceEngine &engine,
@@ -76,8 +82,7 @@ public:
         int num_runs = 5,
         int warmup_runs = 1,
         float temperature = 0.0f,
-        int top_k = 40
-    );
+        int top_k = 40);
 
     static bool export_json(const BenchmarkSuiteResult &result, const std::string &filepath);
     static bool export_csv(const BenchmarkSuiteResult &result, const std::string &filepath);

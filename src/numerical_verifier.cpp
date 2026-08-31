@@ -243,35 +243,56 @@ std::vector<NumericalMetric> NumericalVerifier::verify_model_layer_by_layer(cons
 
     int64_t n_layer = model.n_layer > 0 ? model.n_layer : 4;
     int64_t n_embd = model.architecture.n_embd > 0 ? model.architecture.n_embd : 576;
+    int64_t n_ff = model.architecture.n_ff > 0 ? model.architecture.n_ff : (n_embd * 8 / 3);
 
-    std::vector<float> cpu_hidden(n_embd, 1.0f);
-    std::vector<float> gpu_hidden(n_embd, 1.0f);
+    std::vector<float> cpu_hidden(n_embd);
+    for (int64_t i = 0; i < n_embd; i++)
+        cpu_hidden[i] = (float)std::sin((double)i * 0.05);
+    std::vector<float> gpu_hidden = cpu_hidden;
 
-    ClBuffer b_hidden, b_norm_w, b_out;
+    ClBuffer b_hidden, b_norm_w, b_out, b_gate, b_up, b_ffn_out;
     b_hidden.alloc(cl_backend->dev.context, (size_t)n_embd * sizeof(float));
     b_norm_w.alloc(cl_backend->dev.context, (size_t)n_embd * sizeof(float));
     b_out.alloc(cl_backend->dev.context, (size_t)n_embd * sizeof(float));
-
-    std::vector<float> norm_w(n_embd, 1.0f);
-    clEnqueueWriteBuffer(cl_backend->dev.queue, b_norm_w.mem, CL_TRUE, 0, (size_t)n_embd * sizeof(float), norm_w.data(), 0, nullptr, nullptr);
+    b_gate.alloc(cl_backend->dev.context, (size_t)n_ff * sizeof(float));
+    b_up.alloc(cl_backend->dev.context, (size_t)n_ff * sizeof(float));
+    b_ffn_out.alloc(cl_backend->dev.context, (size_t)n_ff * sizeof(float));
 
     for (int64_t l = 0; l < n_layer; l++)
     {
-        // CPU step
+        std::string prefix = "blk." + std::to_string(l) + ".";
+        auto w_norm = model.tensors.find(prefix + "attn_norm.weight");
+        if (w_norm == model.tensors.end())
+            w_norm = model.tensors.find(prefix + "norm.weight");
+        if (w_norm == model.tensors.end())
+            w_norm = model.tensors.find("output_norm.weight");
+
+        std::vector<float> norm_w(n_embd, 1.0f);
+        if (w_norm != model.tensors.end() && w_norm->second.nelements() == n_embd)
+        {
+            model.dequantize_to_f32(w_norm->second, norm_w.data());
+        }
+        else
+        {
+            for (int64_t i = 0; i < n_embd; i++)
+                norm_w[i] = 1.0f + 0.02f * (float)std::cos((double)(l * n_embd + i) * 0.1);
+        }
+
+        // 1. CPU Layer Forward (RMSNorm + Residual)
         float ss = 0.0f;
         for (int64_t i = 0; i < n_embd; i++)
             ss += cpu_hidden[i] * cpu_hidden[i];
         float s = 1.0f / std::sqrt(ss / (float)n_embd + 1e-5f);
         for (int64_t i = 0; i < n_embd; i++)
-            cpu_hidden[i] = cpu_hidden[i] * s * norm_w[i] + 0.01f * (float)l;
+            cpu_hidden[i] = cpu_hidden[i] + (cpu_hidden[i] * s * norm_w[i]);
 
-        // GPU step
+        // 2. GPU Layer Forward (RMSNorm + Residual)
         clEnqueueWriteBuffer(cl_backend->dev.queue, b_hidden.mem, CL_TRUE, 0, (size_t)n_embd * sizeof(float), gpu_hidden.data(), 0, nullptr, nullptr);
+        clEnqueueWriteBuffer(cl_backend->dev.queue, b_norm_w.mem, CL_TRUE, 0, (size_t)n_embd * sizeof(float), norm_w.data(), 0, nullptr, nullptr);
         cl_backend->rms_norm(b_out, b_hidden, b_norm_w, n_embd, 1);
+        cl_backend->add(b_hidden, b_hidden, b_out, n_embd);
         clFinish(cl_backend->dev.queue);
-        clEnqueueReadBuffer(cl_backend->dev.queue, b_out.mem, CL_TRUE, 0, (size_t)n_embd * sizeof(float), gpu_hidden.data(), 0, nullptr, nullptr);
-        for (int64_t i = 0; i < n_embd; i++)
-            gpu_hidden[i] += 0.01f * (float)l;
+        clEnqueueReadBuffer(cl_backend->dev.queue, b_hidden.mem, CL_TRUE, 0, (size_t)n_embd * sizeof(float), gpu_hidden.data(), 0, nullptr, nullptr);
 
         NumericalMetric m;
         char buf[64];

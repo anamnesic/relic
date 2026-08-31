@@ -6,7 +6,8 @@
 
 // CPU reference state for Qwen3.5's recurrent Gated DeltaNet layers.
 // Values are stored per model layer so multiple sequences can advance token by token.
-class Qwen35RecurrentState {
+class Qwen35RecurrentState
+{
 public:
     bool init(const ArchitectureSpec &spec);
     void reset();
@@ -19,6 +20,23 @@ public:
                     const float *decay, const float *beta, float *output);
 
     int64_t channels() const { return conv_channels; }
+
+    struct Snapshot
+    {
+        std::vector<float> conv_history;
+        std::vector<float> delta_state;
+    };
+
+    Snapshot save_snapshot() const
+    {
+        return {conv_history, delta_state};
+    }
+
+    void restore_snapshot(const Snapshot &snap)
+    {
+        conv_history = snap.conv_history;
+        delta_state = snap.delta_state;
+    }
 
 private:
     int64_t n_layers = 0;

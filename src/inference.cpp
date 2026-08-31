@@ -1,4 +1,5 @@
 #include "inference.h"
+#include "sampler.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -145,77 +146,9 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
     int last_token = 0;
     auto t_gen_start = std::chrono::high_resolution_clock::now();
 
-    struct TopCandidate
-    {
-        float score;
-        int id;
-        bool operator>(const TopCandidate &o) const { return score > o.score; }
-    };
-
-    auto sample_token = [&](std::vector<float> &l_vec) -> int
-    {
-        if (temperature < 0.01f)
-        {
-            return (int)(std::max_element(l_vec.begin(), l_vec.end()) - l_vec.begin());
-        }
-
-        int k_eff = (top_k > 0 && top_k < (int)l_vec.size()) ? top_k : 40;
-        std::vector<TopCandidate> min_heap;
-        min_heap.reserve((size_t)k_eff);
-
-        for (int j = 0; j < (int)l_vec.size(); j++)
-        {
-            float sc = l_vec[j] / temperature;
-            if ((int)min_heap.size() < k_eff)
-            {
-                min_heap.push_back({sc, j});
-                if ((int)min_heap.size() == k_eff)
-                {
-                    std::make_heap(min_heap.begin(), min_heap.end(), std::greater<TopCandidate>());
-                }
-            }
-            else if (sc > min_heap.front().score)
-            {
-                std::pop_heap(min_heap.begin(), min_heap.end(), std::greater<TopCandidate>());
-                min_heap.back() = {sc, j};
-                std::push_heap(min_heap.begin(), min_heap.end(), std::greater<TopCandidate>());
-            }
-        }
-
-        float maxv = min_heap[0].score;
-        for (const auto &c : min_heap)
-            if (c.score > maxv)
-                maxv = c.score;
-
-        float sum = 0.0f;
-        std::vector<float> probs(min_heap.size());
-        for (size_t i = 0; i < min_heap.size(); i++)
-        {
-            probs[i] = expf(min_heap[i].score - maxv);
-            sum += probs[i];
-        }
-        float inv = 1.0f / (sum > 0.0f ? sum : 1.0f);
-        for (auto &p : probs)
-            p *= inv;
-
-        float r = (float)rng() / (float)rng.max();
-        float cum = 0.0f;
-        int choice = min_heap.back().id;
-        for (size_t i = 0; i < probs.size(); i++)
-        {
-            cum += probs[i];
-            if (r < cum)
-            {
-                choice = min_heap[i].id;
-                break;
-            }
-        }
-        return choice;
-    };
-
     while (generated_count < max_tokens)
     {
-        last_token = sample_token(logits);
+        last_token = Sampler::sample(logits.data(), (size_t)model->n_vocab, temperature, top_k, 0.9f);
 
         if (last_token == tokenizer->eos_id)
             break;
@@ -232,7 +165,7 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
             break;
         }
 
-        // Batched speculative verification
+        // Batched speculative verification pipeline with state checkpoint & rollback
         if (enable_speculative && generated_count < max_tokens)
         {
             std::vector<int> drafts = find_prompt_lookup_draft(all_tokens, speculative_ngram, speculative_max_draft);
@@ -240,34 +173,56 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
             {
                 size_t num_draft = drafts.size();
                 std::vector<float> batched_logits(num_draft * (size_t)model->n_vocab);
+
+                // Checkpoint recurrent state & KV cache before speculative exploration
+                decoder->save_state_checkpoint();
+
                 if (decoder->forward_batch(*model, drafts, n_past, batched_logits.data()) == 0)
                 {
+                    int accepted_count = 0;
                     for (size_t d = 0; d < num_draft; d++)
                     {
-                        if (generated_count >= max_tokens)
-                            break;
                         float *curr_logits_ptr = batched_logits.data() + d * (size_t)model->n_vocab;
-                        std::vector<float> curr_logits(curr_logits_ptr, curr_logits_ptr + model->n_vocab);
-                        int target_pred = sample_token(curr_logits);
+                        int target_pred = Sampler::sample(curr_logits_ptr, (size_t)model->n_vocab, temperature, top_k, 0.9f);
                         if (target_pred == drafts[d])
                         {
-                            accepted_spec_tokens++;
-                            n_past++;
-                            std::string draft_piece = tokenizer->decode({drafts[d]});
-                            output += draft_piece;
-                            fprintf(stdout, "%s", draft_piece.c_str());
-                            fflush(stdout);
-                            all_tokens.push_back(drafts[d]);
-                            generated_count++;
-                            logits = curr_logits;
-                            if (drafts[d] == tokenizer->eos_id)
-                                break;
+                            accepted_count++;
                         }
                         else
                         {
                             break;
                         }
                     }
+
+                    // If fewer than all drafts accepted, restore checkpoint and commit ONLY accepted tokens
+                    if (accepted_count < (int)num_draft)
+                    {
+                        decoder->restore_state_checkpoint();
+                        for (int i = 0; i < accepted_count; i++)
+                        {
+                            decoder->forward(*model, drafts[i], n_past + (int64_t)i, nullptr);
+                        }
+                    }
+
+                    for (int i = 0; i < accepted_count; i++)
+                    {
+                        if (generated_count >= max_tokens)
+                            break;
+                        accepted_spec_tokens++;
+                        n_past++;
+                        std::string draft_piece = tokenizer->decode({drafts[i]});
+                        output += draft_piece;
+                        fprintf(stdout, "%s", draft_piece.c_str());
+                        fflush(stdout);
+                        all_tokens.push_back(drafts[i]);
+                        generated_count++;
+                        float *last_acc_logits = batched_logits.data() + (size_t)i * (size_t)model->n_vocab;
+                        memcpy(logits.data(), last_acc_logits, (size_t)model->n_vocab * sizeof(float));
+                    }
+                }
+                else
+                {
+                    decoder->restore_state_checkpoint();
                 }
             }
         }

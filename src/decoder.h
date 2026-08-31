@@ -40,6 +40,37 @@ public:
         return 0;
     }
 
+    // State checkpointing for non-destructive speculative verification
+    virtual void save_state_checkpoint() {}
+    virtual void restore_state_checkpoint() {}
+
+    // Speculative batch verification pipeline with automatic rollback of rejected candidate state
+    virtual int forward_speculative_batch(const LlamaModel &model, const std::vector<int> &draft_tokens, int64_t start_position, float *logits_out, int accepted_count)
+    {
+        save_state_checkpoint();
+        int64_t n_vocab = model.n_vocab;
+        for (size_t i = 0; i < draft_tokens.size(); i++)
+        {
+            float *cur_logits = logits_out ? (logits_out + i * (size_t)n_vocab) : nullptr;
+            int res = forward(model, draft_tokens[i], start_position + (int64_t)i, cur_logits);
+            if (res != 0)
+            {
+                restore_state_checkpoint();
+                return res;
+            }
+        }
+        // Rollback state if fewer than all draft tokens were accepted, and advance only the accepted tokens
+        if (accepted_count < (int)draft_tokens.size())
+        {
+            restore_state_checkpoint();
+            for (int i = 0; i < accepted_count; i++)
+            {
+                forward(model, draft_tokens[i], start_position + (int64_t)i, nullptr);
+            }
+        }
+        return 0;
+    }
+
     // Optional pre-computation / GPU VRAM weight upload ahead of generation timing.
     virtual void warm_up(const LlamaModel &model) {}
 };

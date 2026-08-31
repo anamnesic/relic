@@ -328,6 +328,34 @@ int main(int argc, char **argv)
             plan_pass ? "PASS" : "FAIL", plan.vram_footprint_reduction_pct, plan.pcie_traffic_reduction_pct, plan.estimated_dma_overlap_efficiency);
     pass &= plan_pass;
 
+    // Test Large Model (>4 GB) Heterogeneous Offload Planning (4.5 GB Model on 1.5 GB VRAM Budget)
+    LlamaModel large_model;
+    large_model.n_layer = 32;
+    large_model.architecture.n_embd = 4096;
+    large_model.tensors["token_embd.weight"] = {"token_embd.weight", GgmlType::Q4_0, {4096, 32000}, {}};
+    large_model.tensors["output.weight"] = {"output.weight", GgmlType::Q4_0, {4096, 32000}, {}};
+    large_model.tensors["output_norm.weight"] = {"output_norm.weight", GgmlType::F32, {4096}, {}};
+    for (int l = 0; l < 32; l++) {
+        std::string p = "blk." + std::to_string(l) + ".";
+        large_model.tensors[p + "attn_norm.weight"] = {p + "attn_norm.weight", GgmlType::F32, {4096}, {}};
+        large_model.tensors[p + "attn_q.weight"] = {p + "attn_q.weight", GgmlType::Q4_0, {4096, 4096}, {}};
+        large_model.tensors[p + "attn_k.weight"] = {p + "attn_k.weight", GgmlType::Q4_0, {4096, 1024}, {}};
+        large_model.tensors[p + "attn_v.weight"] = {p + "attn_v.weight", GgmlType::Q4_0, {4096, 1024}, {}};
+        large_model.tensors[p + "attn_output.weight"] = {p + "attn_output.weight", GgmlType::Q4_0, {4096, 4096}, {}};
+        large_model.tensors[p + "ffn_norm.weight"] = {p + "ffn_norm.weight", GgmlType::F32, {4096}, {}};
+        large_model.tensors[p + "ffn_gate.weight"] = {p + "ffn_gate.weight", GgmlType::Q4_0, {11008, 4096}, {}};
+        large_model.tensors[p + "ffn_up.weight"] = {p + "ffn_up.weight", GgmlType::Q4_0, {11008, 4096}, {}};
+        large_model.tensors[p + "ffn_down.weight"] = {p + "ffn_down.weight", GgmlType::Q4_0, {4096, 11008}, {}};
+    }
+    ExecutionPlan large_plan = AdaptivePlanner::generate_plan(large_model, prof, (size_t)(1.5 * 1024 * 1024 * 1024)); // 1.5 GB strict VRAM budget
+    bool large_plan_pass = (!large_plan.tensor_placements.empty() && large_plan.vram_required_bytes <= (size_t)(1.5 * 1024 * 1024 * 1024 + 1024 * 1024));
+    fprintf(stdout, "  Large Model (>4 GB) Heterogeneous Plan: %s (VRAM: %.1f MB / 1536 MB budget, Host RAM: %.1f MB, Offload: %zu tensors)\n",
+            large_plan_pass ? "PASS" : "FAIL",
+            (double)large_plan.vram_required_bytes / (1024.0 * 1024.0),
+            (double)large_plan.host_ram_required_bytes / (1024.0 * 1024.0),
+            large_plan.tensor_placements.size());
+    pass &= large_plan_pass;
+
     // Phase 2 MemoryEngine & Pinned Host Pool Tests
     fprintf(stdout, "\nRunning Phase 2 MemoryEngine & Pinned Pool tests...\n");
     PinnedHostPool pinned_pool(16 * 1024 * 1024); // 16 MB pool
