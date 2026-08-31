@@ -6,6 +6,7 @@
 #include "memory/pinned_host_pool.h"
 #include "memory/async_prefetcher.h"
 #include "speculative/distributed_speculative.h"
+#include "backends/intel_uhd_backend.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -330,6 +331,20 @@ int main(int argc, char **argv) {
     bool spec_pass = (spec_res.num_drafted == 0 && spec_res.accepted_tokens.empty());
     fprintf(stdout, "  DistributedSpeculativeEngine safe fallback: %s\n", spec_pass ? "PASS" : "FAIL");
     pass &= spec_pass;
+
+    // Intel UHD Backend Tests
+    fprintf(stdout, "\nRunning Intel UHD Backend tests...\n");
+    IntelUhdBackend intel_be;
+    bool intel_init = intel_be.initialize();
+    if (intel_init) {
+        DeviceStats stats = intel_be.query_stats();
+        auto shared_buf = intel_be.allocate(1024 * 1024, MemoryTier::TIER1_SHARED_IGPU);
+        bool alloc_pass = (shared_buf != nullptr && shared_buf->size() == 1024 * 1024);
+        fprintf(stdout, "  Intel UHD Shared Memory Allocation (1 MB zero-copy): %s\n", alloc_pass ? "PASS" : "FAIL");
+        pass &= alloc_pass;
+    } else {
+        fprintf(stdout, "  Intel UHD Shared Memory Backend: SKIP (Standalone dGPU mode)\n");
+    }
 
     // Device info summary
     fprintf(stdout, "\n=== Device Summary ===\n");

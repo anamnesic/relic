@@ -22,6 +22,7 @@ add_executable(relic
     src/memory/async_prefetcher.cpp
     src/kv/kv_manager.cpp
     src/speculative/distributed_speculative.cpp
+    src/backends/intel_uhd_backend.cpp
 )
 
 add_executable(relic_test
@@ -38,6 +39,7 @@ add_executable(relic_test
     src/memory/async_prefetcher.cpp
     src/kv/kv_manager.cpp
     src/speculative/distributed_speculative.cpp
+    src/backends/intel_uhd_backend.cpp
 )
 target_include_directories(relic_test PRIVATE src ${OpenCL_INCLUDE_DIRS})
 target_link_libraries(relic_test PRIVATE ${OpenCL_LIBRARIES})
