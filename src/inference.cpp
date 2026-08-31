@@ -93,8 +93,9 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
     fprintf(stdout, "Prompt tokens: %zu\n", input_tokens.size());
     fflush(stdout);
 
-    for (int tok : input_tokens) {
-        if (forward(tok, logits.data()) != 0) {
+    for (size_t i = 0; i < input_tokens.size(); i++) {
+        float *l_ptr = (i + 1 == input_tokens.size()) ? logits.data() : nullptr;
+        if (forward(input_tokens[i], l_ptr) != 0) {
             fprintf(stderr, "Forward pass failed during prompt processing\n");
             fflush(stderr);
             return output;

@@ -401,7 +401,14 @@ public:
         for (const auto &kv : model.tensors) {
             total_original += kv.second.data.size();
             size_t uploaded_bytes = 0;
-            if (gpu_store.upload_auto_q4(cl->dev.context, cl->dev.queue, kv.first, kv.second.data.data(), kv.second.data.size(), kv.second.type, kv.second.nelements(), uploaded_bytes)) {
+            if (kv.first.find("norm") != std::string::npos) {
+                // Pre-dequantize all norm weights to resident F32 in VRAM once!
+                std::vector<float> norm_f32(kv.second.nelements());
+                model.dequantize_to_f32(kv.second, norm_f32.data());
+                if (gpu_store.upload_auto_q4(cl->dev.context, cl->dev.queue, kv.first, norm_f32.data(), norm_f32.size() * sizeof(float), GgmlType::F32, kv.second.nelements(), uploaded_bytes)) {
+                    total_uploaded += uploaded_bytes;
+                }
+            } else if (gpu_store.upload_auto_q4(cl->dev.context, cl->dev.queue, kv.first, kv.second.data.data(), kv.second.data.size(), kv.second.type, kv.second.nelements(), uploaded_bytes)) {
                 total_uploaded += uploaded_bytes;
             }
         }
@@ -542,14 +549,15 @@ public:
 
                 cl->copy(gpu_residual, gpu_hidden, n_embd);
 
-                // RMSNorm
+                // In-VRAM RMSNorm (Zero CPU dequantization & Zero PCIe writes)
                 std::string norm_name = prefix + "attn_norm.weight";
-                if (model.tensors.find(norm_name) == model.tensors.end()) norm_name = prefix + "norm.weight";
-                auto norm_it = model.tensors.find(norm_name);
-                if (norm_it != model.tensors.end()) {
-                    model.dequantize_to_f32(norm_it->second, weights.data());
-                    clEnqueueWriteBuffer(cl->dev.queue, gpu_norm_w.mem, CL_FALSE, 0, (size_t)(n_embd * sizeof(float)), weights.data(), 0, nullptr, nullptr);
-                    cl->rms_norm(gpu_hidden, gpu_hidden, gpu_norm_w, n_embd, 1);
+                ClBuffer *attn_norm_buf = gpu_store.get(norm_name);
+                if (!attn_norm_buf) {
+                    norm_name = prefix + "norm.weight";
+                    attn_norm_buf = gpu_store.get(norm_name);
+                }
+                if (attn_norm_buf) {
+                    cl->rms_norm(gpu_hidden, gpu_hidden, *attn_norm_buf, n_embd, 1);
                 }
 
                 if (is_full_attn) {
@@ -628,13 +636,15 @@ public:
                 // FFN
                 cl->copy(gpu_residual, gpu_hidden, n_embd);
 
+                // In-VRAM FFN RMSNorm (Zero CPU dequantization & Zero PCIe writes)
                 std::string ffn_norm_name = prefix + "ffn_norm.weight";
-                if (model.tensors.find(ffn_norm_name) == model.tensors.end()) ffn_norm_name = prefix + "post_attention_norm.weight";
-                auto ffn_norm_it = model.tensors.find(ffn_norm_name);
-                if (ffn_norm_it != model.tensors.end()) {
-                    model.dequantize_to_f32(ffn_norm_it->second, weights.data());
-                    clEnqueueWriteBuffer(cl->dev.queue, gpu_norm_w.mem, CL_FALSE, 0, (size_t)(n_embd * sizeof(float)), weights.data(), 0, nullptr, nullptr);
-                    cl->rms_norm(gpu_hidden, gpu_hidden, gpu_norm_w, n_embd, 1);
+                ClBuffer *ffn_norm_buf = gpu_store.get(ffn_norm_name);
+                if (!ffn_norm_buf) {
+                    ffn_norm_name = prefix + "post_attention_norm.weight";
+                    ffn_norm_buf = gpu_store.get(ffn_norm_name);
+                }
+                if (ffn_norm_buf) {
+                    cl->rms_norm(gpu_hidden, gpu_hidden, *ffn_norm_buf, n_embd, 1);
                 }
 
                 auto w_gate = model.tensors.find(prefix + "ffn_gate.weight");
@@ -661,22 +671,22 @@ public:
                 }
             }
 
-            // Final RMSNorm
-            auto norm_w = model.tensors.find("output_norm.weight");
-            if (norm_w == model.tensors.end()) norm_w = model.tensors.find("norm.weight");
-            if (norm_w != model.tensors.end()) {
-                model.dequantize_to_f32(norm_w->second, weights.data());
-                clEnqueueWriteBuffer(cl->dev.queue, gpu_norm_w.mem, CL_FALSE, 0, (size_t)(n_embd * sizeof(float)), weights.data(), 0, nullptr, nullptr);
-                cl->rms_norm(gpu_hidden, gpu_hidden, gpu_norm_w, n_embd, 1);
+            // Final In-VRAM RMSNorm (Zero CPU dequantization & Zero PCIe writes)
+            ClBuffer *out_norm_buf = gpu_store.get("output_norm.weight");
+            if (!out_norm_buf) out_norm_buf = gpu_store.get("norm.weight");
+            if (out_norm_buf) {
+                cl->rms_norm(gpu_hidden, gpu_hidden, *out_norm_buf, n_embd, 1);
             }
 
             // Output logits projection
-            auto out_w = model.tensors.find("output.weight");
-            if (out_w == model.tensors.end()) out_w = model.tensors.find("token_embd.weight");
-            if (out_w != model.tensors.end()) {
-                std::string out_name = (out_w->first == "output.weight") ? "output.weight" : "token_embd.weight";
-                dispatch_gemv(gpu_logits, gpu_hidden, out_name, out_w->second, n_vocab, n_embd);
-                clEnqueueReadBuffer(cl->dev.queue, gpu_logits.mem, CL_TRUE, 0, (size_t)(n_vocab * sizeof(float)), logits, 0, nullptr, nullptr);
+            if (logits != nullptr) {
+                auto out_w = model.tensors.find("output.weight");
+                if (out_w == model.tensors.end()) out_w = model.tensors.find("token_embd.weight");
+                if (out_w != model.tensors.end()) {
+                    std::string out_name = (out_w->first == "output.weight") ? "output.weight" : "token_embd.weight";
+                    dispatch_gemv(gpu_logits, gpu_hidden, out_name, out_w->second, n_vocab, n_embd);
+                    clEnqueueReadBuffer(cl->dev.queue, gpu_logits.mem, CL_TRUE, 0, (size_t)(n_vocab * sizeof(float)), logits, 0, nullptr, nullptr);
+                }
             }
         } else {
             // CPU reference fallback
