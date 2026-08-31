@@ -78,8 +78,8 @@
   - [x] Target Model Verifier on NVIDIA GTX 1650 (Batched verification).
   - [x] Draft Model Generator on Intel UHD or CPU AVX2.
   - [x] Multi-device target-draft pipelining with verification metrics.
-- [ ] **Intel UHD OpenCL 3.0 Backend Specialized Kernels**:
-  - [ ] Shared host memory zero-copy draft pipeline on 11th Gen UHD Graphics.
+- [x] **Intel UHD OpenCL 3.0 Backend Specialized Kernels** (`src/backends/intel_uhd_backend.h` / `.cpp`):
+  - [x] Shared host memory zero-copy draft pipeline on 11th Gen UHD Graphics (`CL_MEM_ALLOC_HOST_PTR`).
 
 ---
 
@@ -91,3 +91,4 @@
 - [x] Phase 1 Decoupled Engine validation (100% tests passed).
 - [x] Phase 2 Async Prefetcher & Pinned Host Pool validation (100% tests passed).
 - [x] Phase 3 Distributed Speculative Engine validation (100% tests passed).
+- [x] Phase 3 Intel UHD Zero-Copy Shared Memory Backend validation (100% tests passed).
