@@ -43,6 +43,10 @@ struct ExecutionPlan
 {
     size_t vram_required_bytes = 0;
     size_t host_ram_required_bytes = 0;
+    size_t gtx_vram_weights_bytes = 0;
+    size_t intel_uhd_weights_bytes = 0;
+    size_t pinned_streamed_weights_bytes = 0;
+    size_t actual_gtx_allocation_peak_bytes = 0;
     size_t total_model_uncompressed_bytes = 0;
     double vram_footprint_reduction_pct = 0.0;
     double pcie_traffic_reduction_pct = 0.0;

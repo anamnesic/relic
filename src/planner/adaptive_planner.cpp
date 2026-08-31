@@ -182,6 +182,7 @@ ExecutionPlan AdaptivePlanner::generate_plan(
 
             current_vram_usage += est.memory_bytes;
             plan.vram_required_bytes += est.memory_bytes;
+            plan.gtx_vram_weights_bytes += est.memory_bytes;
             total_compute_time_ms += est.compute_time_ms;
         }
         else
@@ -195,12 +196,28 @@ ExecutionPlan AdaptivePlanner::generate_plan(
             dec.enable_async_prefetch = true;
             dec.data_movement_cost_ms = est.dma_transfer_time_ms;
 
+            if (secondary_device == BackendDeviceType::INTEL_IGPU)
+            {
+                plan.intel_uhd_weights_bytes += host_bytes;
+            }
+            else
+            {
+                plan.pinned_streamed_weights_bytes += host_bytes;
+            }
+
             plan.host_ram_required_bytes += host_bytes;
             total_transfer_time_ms += est.dma_transfer_time_ms;
         }
 
         plan.tensor_placements[est.tensor_name] = dec;
     }
+
+    // Accounted Peak GTX VRAM includes: resident weights + activations + SSM states + Conv1D + KV cache + staging buffer (64 MB)
+    int64_t n_embd_val = model.architecture.n_embd > 0 ? model.architecture.n_embd : 2048;
+    size_t state_overhead_bytes = (size_t)model.n_layer * (16 * 128 * 128 * sizeof(float) + 3 * 2048 * sizeof(float))
+                                + (size_t)2048 * n_embd_val * sizeof(float) * 2
+                                + (size_t)64 * 1024 * 1024;
+    plan.actual_gtx_allocation_peak_bytes = plan.gtx_vram_weights_bytes + state_overhead_bytes;
 
     // 4. Calculate Layer Offload Counts & Form Contiguous Device Islands
     int64_t n_embd = model.architecture.n_embd > 0 ? model.architecture.n_embd : 2048;
