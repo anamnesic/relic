@@ -57,6 +57,8 @@ int main(int argc, char **argv)
     int speculative_ngram = 3;
     int speculative_draft_max = 3;
     int max_seq_len = 2048;
+    int vram_budget_mb = 0;
+    bool run_sweep = false;
 
     for (int i = 1; i < argc; i++)
     {
@@ -100,6 +102,10 @@ int main(int argc, char **argv)
             speculative_draft_max = atoi(argv[++i]);
         else if (strcmp(argv[i], "--max-seq-len") == 0 && i + 1 < argc)
             max_seq_len = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--vram-budget-mb") == 0 && i + 1 < argc)
+            vram_budget_mb = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--sweep") == 0)
+            run_sweep = true;
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0)
         {
             print_usage(argv[0]);
@@ -227,9 +233,52 @@ int main(int argc, char **argv)
         }
     }
 
-    // Run Adaptive Planner to determine optimal tensor placement
     HardwareProfile prof = HardwareProfile::probe_system();
-    size_t vram_budget = cl_ok ? cl.dev.global_mem : 0;
+
+    if (run_sweep)
+    {
+        fprintf(stdout, "\n========================================================================================\n");
+        fprintf(stdout, "           RELIC OVER-BUDGET INFERENCE SWEEP: PERFORMANCE VS VRAM BUDGET                \n");
+        fprintf(stdout, "========================================================================================\n");
+        fprintf(stdout, "| VRAM Budget | Planned Mode      | GPU VRAM | Host RAM | Offloaded Layers | Decode (tok/s) |\n");
+        fprintf(stdout, "|-------------|-------------------|----------|----------|------------------|----------------|\n");
+
+        std::vector<int> test_budgets_mb = {3500, 2500, 1500, 1000};
+        std::vector<double> recorded_tok_s;
+
+        for (int b_mb : test_budgets_mb)
+        {
+            size_t b_bytes = (size_t)b_mb * 1024 * 1024;
+            ExecutionPlan p = AdaptivePlanner::generate_plan(model, prof, b_bytes);
+
+            InferenceEngine sw_engine;
+            sw_engine.enable_speculative = speculative;
+            sw_engine.speculative_ngram = speculative_ngram;
+            sw_engine.speculative_max_draft = speculative_draft_max;
+
+            if (sw_engine.init(&model, &tokenizer, cl_ok ? &cl : nullptr, max_seq_len, &p))
+            {
+                BenchmarkSuiteResult b_res = BenchmarkSuite::run_full_suite(sw_engine, prompt, std::min(n_tokens, 10), 2, 1, temperature, top_k);
+                double tok_s = b_res.stats.median_decode_tok_per_sec;
+                recorded_tok_s.push_back(tok_s);
+
+                std::string mode_str = (p.host_ram_required_bytes == 0) ? "Full VRAM" : "Hybrid Offload";
+
+                fprintf(stdout, "| %7d MB | %-17s | %6.1f MB | %6.1f MB | %10d / %-3lld | %14.2f |\n",
+                        b_mb, mode_str.c_str(),
+                        (double)p.vram_required_bytes / (1024.0 * 1024.0),
+                        (double)p.host_ram_required_bytes / (1024.0 * 1024.0),
+                        (int)model.n_layer - p.num_layers_fully_offloaded, (long long)model.n_layer,
+                        tok_s);
+                sw_engine.free_buffers();
+            }
+        }
+        fprintf(stdout, "========================================================================================\n");
+        return 0;
+    }
+
+    // Run Adaptive Planner to determine optimal tensor placement
+    size_t vram_budget = (vram_budget_mb > 0) ? (size_t)vram_budget_mb * 1024 * 1024 : (cl_ok ? cl.dev.global_mem : 0);
     ExecutionPlan plan = AdaptivePlanner::generate_plan(model, prof, vram_budget);
     fprintf(stdout, "\n[Adaptive Planner] VRAM Budget: %.2f MB | Required: %.2f MB | Fully Offloaded Layers: %d/%lld\n",
             (double)vram_budget / (1024.0 * 1024.0),
