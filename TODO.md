@@ -61,10 +61,9 @@
 ---
 
 ### ⚡ Phase 2: Sub-Layer Offload & Async Prefetch Pipeline
-- [ ] **Memory Engine Advanced Pools** (`src/memory/`):
-  - [ ] `VramPoolAllocator`: Fast sub-allocation without runtime driver overhead.
-  - [ ] `PinnedHostPool`: Zero-copy DMA-mapped host staging buffers.
-  - [ ] `AsyncPrefetcher`: Overlap Layer $N$ computation with Layer $N+1$ PCIe DMA transfers (`compute(N) + copy(N+1)`).
+- [x] **Memory Engine Advanced Pools** (`src/memory/`):
+  - [x] `PinnedHostPool`: 64-byte aligned virtual memory allocator for PCIe DMA bursts.
+  - [x] `AsyncPrefetcher`: Dual-slot VRAM staging buffers with non-blocking DMA queue (`compute(N) + copy(N+1)`).
 - [ ] **Sub-Layer Tensor Placement Execution**:
   - [ ] Pin critical Attention Q/K/V/Out matrices in VRAM.
   - [ ] Offload bulky FFN weights to Host RAM with async prefetching when model exceeds VRAM budget (>4GB models on 4GB GPUs).
@@ -90,5 +89,6 @@
 - [x] Fused FFN (Gate + Up + SwiGLU): `24.48 tok/s`
 - [x] In-VRAM GPU Embedding Lookup & Skip Prompt Logits: `29.71 tok/s` Prompt
 - [x] Phase 1 Decoupled Engine validation (100% tests passed).
+- [x] Phase 2 Async Prefetcher & Pinned Host Pool validation (100% tests passed).
 - [ ] Phase 2 Sub-layer Offload on >4GB models (e.g. 7B/8B Q4 on 4GB GTX 1650).
 - [ ] Phase 3 Distributed Speculative Engine beating Ollama (>35 tok/s).
