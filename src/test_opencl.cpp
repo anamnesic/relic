@@ -3,6 +3,8 @@
 #include "qwen35_state.h"
 #include "decoder.h"
 #include "planner/adaptive_planner.h"
+#include "memory/pinned_host_pool.h"
+#include "memory/async_prefetcher.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -298,6 +300,27 @@ int main(int argc, char **argv) {
     bool plan_pass = (!plan.tensor_placements.empty() && plan.vram_required_bytes > 0);
     fprintf(stdout, "  AdaptivePlanner execution plan generation: %s (%zu placements)\n", plan_pass ? "PASS" : "FAIL", plan.tensor_placements.size());
     pass &= plan_pass;
+
+    // Phase 2 Pinned Host Pool & Async Prefetcher Tests
+    fprintf(stdout, "\nRunning Phase 2 Memory & Prefetcher tests...\n");
+    PinnedHostPool pinned_pool(16 * 1024 * 1024); // 16 MB pool
+    void *pinned_alloc = pinned_pool.allocate_pinned(1024 * 1024);
+    bool pinned_pass = (pinned_alloc != nullptr && pinned_pool.used() == 1024 * 1024);
+    fprintf(stdout, "  PinnedHostPool allocation (64-byte aligned): %s\n", pinned_pass ? "PASS" : "FAIL");
+    pass &= pinned_pass;
+
+    AsyncPrefetcher prefetcher(cl.dev.context, cl.dev.queue);
+    bool prefetcher_init = prefetcher.initialize(4 * 1024 * 1024); // 4 MB dual-slot staging
+    bool prefetch_pass = prefetcher_init;
+    if (prefetcher_init && pinned_alloc) {
+        std::vector<float> mock_layer_data(256 * 1024, 1.0f); // 1 MB
+        memcpy(pinned_alloc, mock_layer_data.data(), mock_layer_data.size() * sizeof(float));
+        bool pf_ok = prefetcher.prefetch_async(pinned_alloc, mock_layer_data.size() * sizeof(float), 0);
+        prefetcher.wait_ready(0);
+        prefetch_pass &= (pf_ok && prefetcher.get_staging_mem(0) != nullptr);
+    }
+    fprintf(stdout, "  AsyncPrefetcher non-blocking DMA transfer & wait: %s\n", prefetch_pass ? "PASS" : "FAIL");
+    pass &= prefetch_pass;
 
     // Device info summary
     fprintf(stdout, "\n=== Device Summary ===\n");

@@ -18,6 +18,8 @@ add_executable(relic
     src/planner/hardware_profile.cpp
     src/planner/adaptive_planner.cpp
     src/memory/memory_engine.cpp
+    src/memory/pinned_host_pool.cpp
+    src/memory/async_prefetcher.cpp
     src/kv/kv_manager.cpp
 )
 
@@ -30,6 +32,10 @@ add_executable(relic_test
     src/model.cpp
     src/planner/hardware_profile.cpp
     src/planner/adaptive_planner.cpp
+    src/memory/memory_engine.cpp
+    src/memory/pinned_host_pool.cpp
+    src/memory/async_prefetcher.cpp
+    src/kv/kv_manager.cpp
 )
 target_include_directories(relic_test PRIVATE src ${OpenCL_INCLUDE_DIRS})
 target_link_libraries(relic_test PRIVATE ${OpenCL_LIBRARIES})
