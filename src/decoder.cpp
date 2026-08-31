@@ -137,6 +137,18 @@ namespace
             std::fill(act.begin(), act.end(), 0.0f);
         }
 
+        void save_state_checkpoint() override
+        {
+            snapshot_kv_cache_ = kv_cache;
+            snapshot_act_ = act;
+        }
+
+        void restore_state_checkpoint() override
+        {
+            kv_cache = snapshot_kv_cache_;
+            act = snapshot_act_;
+        }
+
         int forward(const LlamaModel &model, int token_id, int64_t position, float *logits) override
         {
             if (position >= seq_limit)
@@ -356,6 +368,8 @@ namespace
         std::vector<float> act;
         std::vector<float> weights;
         std::vector<float> kv_cache;
+        std::vector<float> snapshot_kv_cache_;
+        std::vector<float> snapshot_act_;
     };
 
     //------------------------------------------------------------------------------
@@ -432,6 +446,8 @@ namespace
                 gpu_conv_snapshot_.resize((size_t)arch.n_layer);
                 gpu_k_caches.resize((size_t)arch.n_layer);
                 gpu_v_caches.resize((size_t)arch.n_layer);
+                gpu_k_snapshot_.resize((size_t)arch.n_layer);
+                gpu_v_snapshot_.resize((size_t)arch.n_layer);
 
                 for (size_t l = 0; l < (size_t)arch.n_layer; l++)
                 {
@@ -448,6 +464,8 @@ namespace
                     {
                         gpu_k_caches[l].alloc(cl->dev.context, (size_t)(max_seq_len * n_embd * sizeof(float)));
                         gpu_v_caches[l].alloc(cl->dev.context, (size_t)(max_seq_len * n_embd * sizeof(float)));
+                        gpu_k_snapshot_[l].alloc(cl->dev.context, (size_t)(max_seq_len * n_embd * sizeof(float)));
+                        gpu_v_snapshot_[l].alloc(cl->dev.context, (size_t)(max_seq_len * n_embd * sizeof(float)));
                         cl->fill(gpu_k_caches[l], 0.0f, max_seq_len * n_embd);
                         cl->fill(gpu_v_caches[l], 0.0f, max_seq_len * n_embd);
                     }
@@ -485,6 +503,10 @@ namespace
                         clEnqueueCopyBuffer(cl->dev.queue, gpu_ssm_states[l].mem, gpu_ssm_snapshot_[l].mem, 0, 0, 16 * 128 * 128 * sizeof(float), 0, nullptr, nullptr);
                     if (gpu_conv_states[l].mem && l < gpu_conv_snapshot_.size() && gpu_conv_snapshot_[l].mem)
                         clEnqueueCopyBuffer(cl->dev.queue, gpu_conv_states[l].mem, gpu_conv_snapshot_[l].mem, 0, 0, (size_t)(3 * total_qkv * sizeof(float)), 0, nullptr, nullptr);
+                    if (gpu_k_caches[l].mem && l < gpu_k_snapshot_.size() && gpu_k_snapshot_[l].mem)
+                        clEnqueueCopyBuffer(cl->dev.queue, gpu_k_caches[l].mem, gpu_k_snapshot_[l].mem, 0, 0, (size_t)(seq_limit * arch.n_embd * sizeof(float)), 0, nullptr, nullptr);
+                    if (gpu_v_caches[l].mem && l < gpu_v_snapshot_.size() && gpu_v_snapshot_[l].mem)
+                        clEnqueueCopyBuffer(cl->dev.queue, gpu_v_caches[l].mem, gpu_v_snapshot_[l].mem, 0, 0, (size_t)(seq_limit * arch.n_embd * sizeof(float)), 0, nullptr, nullptr);
                 }
                 clFinish(cl->dev.queue);
             }
@@ -504,6 +526,10 @@ namespace
                         clEnqueueCopyBuffer(cl->dev.queue, gpu_ssm_snapshot_[l].mem, gpu_ssm_states[l].mem, 0, 0, 16 * 128 * 128 * sizeof(float), 0, nullptr, nullptr);
                     if (gpu_conv_states[l].mem && l < gpu_conv_snapshot_.size() && gpu_conv_snapshot_[l].mem)
                         clEnqueueCopyBuffer(cl->dev.queue, gpu_conv_snapshot_[l].mem, gpu_conv_states[l].mem, 0, 0, (size_t)(3 * total_qkv * sizeof(float)), 0, nullptr, nullptr);
+                    if (gpu_k_caches[l].mem && l < gpu_k_snapshot_.size() && gpu_k_snapshot_[l].mem)
+                        clEnqueueCopyBuffer(cl->dev.queue, gpu_k_snapshot_[l].mem, gpu_k_caches[l].mem, 0, 0, (size_t)(seq_limit * arch.n_embd * sizeof(float)), 0, nullptr, nullptr);
+                    if (gpu_v_caches[l].mem && l < gpu_v_snapshot_.size() && gpu_v_snapshot_[l].mem)
+                        clEnqueueCopyBuffer(cl->dev.queue, gpu_v_snapshot_[l].mem, gpu_v_caches[l].mem, 0, 0, (size_t)(seq_limit * arch.n_embd * sizeof(float)), 0, nullptr, nullptr);
                 }
                 clFinish(cl->dev.queue);
             }
@@ -644,25 +670,36 @@ namespace
                 }
             }
 
-            // 2. Check if resident on Intel UHD shared memory
+            // 2. Check if resident on Intel UHD shared memory (True Cross-Context Execution Bridge)
             auto uhd_it = intel_tensors.find(name);
             if (uhd_it != intel_tensors.end() && intel_backend)
             {
-                auto *uhd_buf = dynamic_cast<IntelUhdBuffer *>(uhd_it->second.get());
-                if (uhd_buf && uhd_buf->mem())
+                // Cross-Context Bridge:
+                // GTX in -> Host Staging -> Intel UHD Buffer -> Compute on Intel iGPU -> Host Staging -> GTX dst
+                if (weights.size() < (size_t)std::max(N, K))
+                    weights.resize((size_t)std::max(N, K));
+
+                clEnqueueReadBuffer(cl->dev.queue, in.mem, CL_TRUE, 0, (size_t)(K * sizeof(float)), weights.data(), 0, nullptr, nullptr);
+
+                auto uhd_in = intel_backend->allocate((size_t)(K * sizeof(float)), MemoryTier::TIER1_SHARED_IGPU);
+                auto uhd_dst = intel_backend->allocate((size_t)(N * sizeof(float)), MemoryTier::TIER1_SHARED_IGPU);
+
+                if (uhd_in && uhd_dst)
                 {
-                    ClBuffer staging_buf;
-                    staging_buf.mem = uhd_buf->mem();
+                    intel_backend->upload(*uhd_in, weights.data(), (size_t)(K * sizeof(float)));
                     if (t.type == GgmlType::Q4_0)
                     {
-                        cl->gemv_q4_0(dst, in, staging_buf, N, K);
-                        return;
+                        intel_backend->gemv_q4_0(*uhd_dst, *uhd_in, *(uhd_it->second), N, K);
                     }
                     else if (t.type == GgmlType::Q8_0)
                     {
-                        cl->gemv_q8_0(dst, in, staging_buf, N, K);
-                        return;
+                        intel_backend->gemv_q8_0(*uhd_dst, *uhd_in, *(uhd_it->second), N, K);
                     }
+                    intel_backend->synchronize();
+                    intel_backend->download(weights.data(), *uhd_dst, (size_t)(N * sizeof(float)));
+
+                    clEnqueueWriteBuffer(cl->dev.queue, dst.mem, CL_TRUE, 0, (size_t)(N * sizeof(float)), weights.data(), 0, nullptr, nullptr);
+                    return;
                 }
             }
 
@@ -1315,6 +1352,8 @@ namespace
 
         std::vector<ClBuffer> gpu_ssm_snapshot_;
         std::vector<ClBuffer> gpu_conv_snapshot_;
+        std::vector<ClBuffer> gpu_k_snapshot_;
+        std::vector<ClBuffer> gpu_v_snapshot_;
 
         std::unique_ptr<PinnedHostPool> pinned_pool;
         std::unique_ptr<AsyncPrefetcher> prefetcher;

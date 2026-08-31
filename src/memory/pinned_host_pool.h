@@ -13,9 +13,11 @@ public:
 
     size_t capacity() const { return capacity_; }
     size_t used() const { return used_offset_; }
+    bool is_locked() const { return is_locked_; }
 
 private:
     size_t capacity_;
     size_t used_offset_;
     void* host_ptr_;
+    bool is_locked_;
 };

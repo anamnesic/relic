@@ -111,6 +111,20 @@ ExecutionPlan AdaptivePlanner::generate_plan(
     {
         const auto &tensor = kv.second;
         size_t raw_bytes = tensor.data.size();
+        if (raw_bytes == 0)
+        {
+            int64_t ne = 1;
+            for (auto d : tensor.dims)
+                ne *= d;
+            if (tensor.type == GgmlType::Q4_0)
+                raw_bytes = (size_t)((ne + 31) / 32) * 18;
+            else if (tensor.type == GgmlType::Q8_0)
+                raw_bytes = (size_t)((ne + 31) / 32) * 34;
+            else if (tensor.type == GgmlType::F16)
+                raw_bytes = (size_t)ne * 2;
+            else
+                raw_bytes = (size_t)ne * 4;
+        }
         total_uncompressed_bytes += raw_bytes;
 
         GgmlType rep = choose_representation(kv.first, tensor, primary_device);
@@ -165,6 +179,22 @@ ExecutionPlan AdaptivePlanner::generate_plan(
         if (it == model.tensors.end())
             continue;
 
+        size_t tensor_raw_bytes = it->second.data.size();
+        if (tensor_raw_bytes == 0)
+        {
+            int64_t ne = 1;
+            for (auto d : it->second.dims)
+                ne *= d;
+            if (it->second.type == GgmlType::Q4_0)
+                tensor_raw_bytes = (size_t)((ne + 31) / 32) * 18;
+            else if (it->second.type == GgmlType::Q8_0)
+                tensor_raw_bytes = (size_t)((ne + 31) / 32) * 34;
+            else if (it->second.type == GgmlType::F16)
+                tensor_raw_bytes = (size_t)ne * 2;
+            else
+                tensor_raw_bytes = (size_t)ne * 4;
+        }
+
         TensorPlacementDecision dec;
         dec.tensor_name = est.tensor_name;
         dec.representation = est.representation;
@@ -189,12 +219,12 @@ ExecutionPlan AdaptivePlanner::generate_plan(
             // Sub-layer offload to Pinned Host RAM with Async Prefetch
             dec.target_tier = (secondary_device == BackendDeviceType::INTEL_IGPU) ? MemoryTier::TIER1_SHARED_IGPU : MemoryTier::TIER2_HOST_PINNED_RAM;
             dec.target_device = (secondary_device == BackendDeviceType::INTEL_IGPU) ? secondary_device : BackendDeviceType::CPU_AVX2;
-            dec.resident_bytes = it->second.data.size();
+            dec.resident_bytes = tensor_raw_bytes;
             dec.keep_resident_in_vram = false;
             dec.enable_async_prefetch = true;
             dec.data_movement_cost_ms = est.dma_transfer_time_ms;
 
-            plan.host_ram_required_bytes += it->second.data.size();
+            plan.host_ram_required_bytes += tensor_raw_bytes;
             total_transfer_time_ms += est.dma_transfer_time_ms;
         }
 
