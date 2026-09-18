@@ -70,111 +70,15 @@ bool LlamaModel::load(const char *filename) {
     return true;
 }
 
-static void dequantize_q4_0_row(const uint8_t *block, float *out, int64_t n) {
-    int64_t num_blocks = (n + 31) / 32;
-    for (int64_t b = 0; b < num_blocks; b++) {
-        uint16_t d_bits;
-        memcpy(&d_bits, block + b * 18, 2);
-        float d = half_bits_to_float(d_bits);
-        const uint8_t *qs = block + b * 18 + 2;
-        for (int i = 0; i < 16 && b * 32 + i * 2 < n; i++) {
-            uint8_t q = qs[i];
-            float q0 = (float)(int8_t)((q & 0x0F) << 4) * 0.0625f;
-            float q1 = (float)(int8_t)((q & 0xF0)) * 0.0625f;
-            out[b * 32 + i * 2] = q0 * d;
-            if (b * 32 + i * 2 + 1 < n)
-                out[b * 32 + i * 2 + 1] = q1 * d;
-        }
-    }
-}
-
-static void dequantize_q8_0_row(const uint8_t *block, float *out, int64_t n) {
-    int64_t num_blocks = (n + 31) / 32;
-    for (int64_t b = 0; b < num_blocks; b++) {
-        uint16_t d_bits;
-        memcpy(&d_bits, block + b * 34, 2);
-        float d = half_bits_to_float(d_bits);
-        const int8_t *qs = (const int8_t *)(block + b * 34 + 2);
-        for (int i = 0; i < 32 && b * 32 + i < n; i++) {
-            out[b * 32 + i] = (float)qs[i] * d;
-        }
-    }
-}
-
-static void dequantize_f16_row(const uint8_t *block, float *out, int64_t n) {
-    const uint16_t *f16 = (const uint16_t *)block;
-    for (int64_t i = 0; i < n; i++) {
-        out[i] = half_bits_to_float(f16[i]);
-    }
-}
-
 void LlamaModel::dequantize_to_f32(const Tensor &t, float *out) const {
-    int64_t n = t.nelements();
-
-    switch (t.type) {
-        case GgmlType::F32:
-            memcpy(out, t.data.data(), n * 4);
-            break;
-        case GgmlType::F16:
-            dequantize_f16_row(t.data.data(), out, n);
-            break;
-        case GgmlType::Q4_0:
-            for (int64_t row = 0; row < n; row += t.dims[0]) {
-                int64_t row_size = t.dims[0];
-                const uint8_t *src_row = t.data.data() + (row / t.dims[0]) * ((row_size + 31) / 32) * 18;
-                dequantize_q4_0_row(src_row, out + row, row_size);
-            }
-            break;
-        case GgmlType::Q8_0:
-            for (int64_t row = 0; row < n; row += t.dims[0]) {
-                int64_t row_size = t.dims[0];
-                const uint8_t *src_row = t.data.data() + (row / t.dims[0]) * ((row_size + 31) / 32) * 34;
-                dequantize_q8_0_row(src_row, out + row, row_size);
-            }
-            break;
-        default:
-            fprintf(stderr, "Unsupported type for dequantization: %d\n", (int)t.type);
-            memset(out, 0, n * 4);
-            break;
-    }
+    int64_t row_size = t.dims.empty() ? t.nelements() : t.dims[0];
+    int64_t total_rows = t.dims.size() > 1 ? t.dims[1] : (row_size > 0 ? t.nelements() / row_size : 1);
+    relic::quant::dequantize_rows(t.type, t.data.data(), row_size, 0, total_rows, out);
 }
 
 void LlamaModel::dequantize_rows_to_f32(const Tensor &t, int64_t start_row, int64_t num_rows, float *out) const {
     int64_t row_size = t.dims.empty() ? t.nelements() : t.dims[0];
     int64_t total_rows = t.dims.size() > 1 ? t.dims[1] : (row_size > 0 ? t.nelements() / row_size : 1);
     num_rows = std::min(num_rows, total_rows - start_row);
-    if (num_rows <= 0) return;
-
-    switch (t.type) {
-        case GgmlType::F32: {
-            const float *src = (const float *)t.data.data();
-            memcpy(out, src + start_row * row_size, (size_t)(num_rows * row_size * sizeof(float)));
-            break;
-        }
-        case GgmlType::F16: {
-            const uint8_t *src = t.data.data() + start_row * row_size * 2;
-            dequantize_f16_row(src, out, num_rows * row_size);
-            break;
-        }
-        case GgmlType::Q4_0: {
-            size_t bytes_per_row = (size_t)((row_size + 31) / 32) * 18;
-            for (int64_t r = 0; r < num_rows; r++) {
-                const uint8_t *src_row = t.data.data() + (start_row + r) * bytes_per_row;
-                dequantize_q4_0_row(src_row, out + r * row_size, row_size);
-            }
-            break;
-        }
-        case GgmlType::Q8_0: {
-            size_t bytes_per_row = (size_t)((row_size + 31) / 32) * 34;
-            for (int64_t r = 0; r < num_rows; r++) {
-                const uint8_t *src_row = t.data.data() + (start_row + r) * bytes_per_row;
-                dequantize_q8_0_row(src_row, out + r * row_size, row_size);
-            }
-            break;
-        }
-        default:
-            fprintf(stderr, "Unsupported type for row dequantization: %d\n", (int)t.type);
-            memset(out, 0, (size_t)(num_rows * row_size * sizeof(float)));
-            break;
-    }
+    relic::quant::dequantize_rows(t.type, t.data.data(), row_size, start_row, num_rows, out);
 }

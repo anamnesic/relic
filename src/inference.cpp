@@ -7,25 +7,19 @@
 #include <cstring>
 #include <random>
 
-bool InferenceEngine::init(LlamaModel *m, Tokenizer *tok, OpenClBackend *backend,
+#include "opencl_backend.h"
+
+bool InferenceEngine::init(NeuralModel *m, Tokenizer *tok, std::unique_ptr<ArchitectureDecoder> dec,
                            int64_t max_seq_limit, const ExecutionPlan *exec_plan)
 {
-    if (!m)
+    if (!m || !dec)
         return false;
     model = m;
     tokenizer = tok;
-    cl = backend;
+    decoder = std::move(dec);
     plan = exec_plan;
     max_seq_len = max_seq_limit;
     n_past = 0;
-
-    decoder = create_decoder(model->architecture, cl);
-    if (!decoder)
-    {
-        fprintf(stderr, "No decoder adapter available for architecture: %s\n",
-                model->architecture.name.c_str());
-        return false;
-    }
 
     if (!decoder->init(model->architecture, max_seq_len, plan))
     {
@@ -35,8 +29,22 @@ bool InferenceEngine::init(LlamaModel *m, Tokenizer *tok, OpenClBackend *backend
     }
 
     decoder->warm_up(*model);
-
     return true;
+}
+
+bool InferenceEngine::init(NeuralModel *m, Tokenizer *tok, OpenClBackend *backend,
+                           int64_t max_seq_limit, const ExecutionPlan *exec_plan)
+{
+    if (!m)
+        return false;
+    auto dec = create_decoder(m->architecture, backend);
+    if (!dec)
+    {
+        fprintf(stderr, "No decoder adapter available for architecture: %s\n",
+                m->architecture.name.c_str());
+        return false;
+    }
+    return init(m, tok, std::move(dec), max_seq_limit, exec_plan);
 }
 
 void InferenceEngine::free_buffers()
@@ -109,6 +117,7 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
     std::string output;
     std::mt19937 rng(42);
 
+    bool dev_sample = decoder && decoder->supports_device_sampling();
     auto t_start = std::chrono::high_resolution_clock::now();
 
     fprintf(stdout, "Prompt tokens: %zu\n", input_tokens.size());
@@ -117,7 +126,7 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
     for (size_t i = 0; i < input_tokens.size(); i++)
     {
         bool is_last = (i + 1 == input_tokens.size());
-        float *l_ptr = (is_last && (!cl || !cl->initialized)) ? logits.data() : nullptr;
+        float *l_ptr = (is_last && !dev_sample) ? logits.data() : nullptr;
         if (forward(input_tokens[i], l_ptr, is_last) != 0)
         {
             fprintf(stderr, "Forward pass failed during prompt processing\n");
@@ -149,7 +158,7 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
 
     while (generated_count < max_tokens)
     {
-        if (cl && cl->initialized)
+        if (dev_sample)
         {
             last_token = decoder->sample_token(temperature, top_k, 0.9f);
         }
@@ -167,7 +176,7 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
         all_tokens.push_back(last_token);
         generated_count++;
 
-        float *l_ptr = (cl && cl->initialized) ? nullptr : logits.data();
+        float *l_ptr = dev_sample ? nullptr : logits.data();
         if (forward(last_token, l_ptr, true) != 0)
         {
             fprintf(stderr, "\nForward pass failed during token generation\n");

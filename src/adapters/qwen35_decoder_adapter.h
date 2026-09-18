@@ -3,9 +3,7 @@
 #include "decoder.h"
 #include "opencl_backend.h"
 #include "qwen35_state.h"
-#include "memory/async_prefetcher.h"
-#include "memory/pinned_host_pool.h"
-#include "backends/intel_uhd_backend.h"
+#include "qwen35_weights_manager.h"
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -24,6 +22,7 @@ public:
     void warm_up(const LlamaModel &model) override;
     int forward(const LlamaModel &model, int token_id, int64_t position, float *logits, bool compute_output = true) override;
     int sample_token(float temperature = 0.0f, int top_k = 40, float top_p = 0.9f) override;
+    bool supports_device_sampling() const override { return use_gpu; }
 
 private:
     void ensure_weights_uploaded(const LlamaModel &model);
@@ -35,14 +34,13 @@ private:
     OpenClBackend *cl = nullptr;
     const ExecutionPlan *plan_ = nullptr;
     bool use_gpu = false;
-    bool weights_uploaded = false;
     int64_t seq_limit = 2048;
     Qwen35RecurrentState recurrent_state;
     std::vector<float> act;
     std::vector<float> weights;
     std::vector<float> full_attn_kv;
 
-    GpuTensorStore gpu_store;
+    std::unique_ptr<Qwen35WeightsManager> weights_mgr;
 
     ClBuffer gpu_hidden;
     ClBuffer gpu_residual;
@@ -63,8 +61,6 @@ private:
     ClBuffer gpu_logits;
     ClBuffer gpu_norm_w;
     ClBuffer gpu_act_a;
-    ClBuffer gpu_act_dst;
-    ClBuffer gpu_weights;
 
     std::vector<ClBuffer> gpu_ssm_states;
     std::vector<ClBuffer> gpu_conv_states;
@@ -75,14 +71,6 @@ private:
     std::vector<ClBuffer> gpu_conv_snapshot_;
     std::vector<ClBuffer> gpu_k_snapshot_;
     std::vector<ClBuffer> gpu_v_snapshot_;
-
-    std::unique_ptr<PinnedHostPool> pinned_pool;
-    std::unique_ptr<AsyncPrefetcher> prefetcher;
-    std::unique_ptr<IntelUhdBackend> intel_backend;
-    std::shared_ptr<BackendBuffer> uhd_in_buf_;
-    std::shared_ptr<BackendBuffer> uhd_dst_buf_;
-    std::unordered_map<std::string, void *> pinned_tensor_ptrs;
-    std::unordered_map<std::string, std::shared_ptr<BackendBuffer>> intel_tensors;
 
     Qwen35RecurrentState::Snapshot snapshot_recurrent_;
     std::vector<float> snapshot_full_attn_kv_;

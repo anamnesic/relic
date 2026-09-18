@@ -181,6 +181,29 @@
 
 ---
 
+### 🏛️ Phase 5: Hexagonal Architecture & Deep Refactoring (In Progress)
+- [x] **1. InferenceEngine Dependency Inversion & Pure Domain Decoupling**:
+  - [x] Remove `#include "opencl_backend.h"` from `src/inference.h`.
+  - [x] Inject `std::unique_ptr<ArchitectureDecoder>` directly into `InferenceEngine` or provide an abstract `IDecoderFactory`.
+  - [x] Eliminate concrete hardware driver references from the domain application service.
+  - [x] Use `ArchitectureDecoder::supports_device_sampling` port query instead of concrete driver checks.
+- [x] **2. Unified Quantization Utilities (`src/quantization/quant_utils.h`)**:
+  - [x] Centralize FP16 conversion (`float_to_half_bits`, `float_to_half_val`, `half_bits_to_float`).
+  - [x] Centralize block and row dequantization for Q8_0, Q4_0, and F32.
+  - [x] Deduplicate `model_dequant_rows` across `Qwen35DecoderAdapter`, `model.h`, and `model.cpp`.
+- [ ] **3. Internal Decomposition of `Qwen35DecoderAdapter` (SRP & Cohesion)**:
+  - [x] Extract `Qwen35WeightsManager` (`src/adapters/qwen35_weights_manager.{h,cpp}`): Weight uploading, VRAM placement, Q8_0 $\to$ Q4_0 on-the-fly repacking, and GEMV dispatch.
+  - [ ] Extract `Qwen35RecurrentBlock` (`src/adapters/qwen35_recurrent_block.{h,cpp}`): Gated DeltaNet SSM Conv1d and recurrent state steps.
+  - [ ] Extract `Qwen35AttentionBlock` (`src/adapters/qwen35_attention_block.{h,cpp}`): Full self-attention, RoPE, KV cache append, and scaled dot-product.
+  - [ ] Extract `Qwen35MlpBlock` (`src/adapters/qwen35_mlp_block.{h,cpp}`): SwiGLU FFN gating and down-projection.
+- [ ] **4. Unified Backend Device Interface**:
+  - [ ] Align `OpenClBackend` with `Backend` interface from `src/backends/backend.h`.
+  - [ ] Unify `ClBuffer` under `BackendBuffer`.
+- [x] **5. Ubiquitous Domain Language**:
+  - [x] Introduce `using NeuralModel = LlamaModel;` domain abstraction.
+
+---
+
 ## 📊 Benchmark & Validation Milestones
 - [x] Baseline GPU Port: `0.39 tok/s`
 - [x] Multi-Row 8x & On-the-Fly Q4 Repack: `22.75 tok/s`

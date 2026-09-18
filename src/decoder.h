@@ -46,6 +46,7 @@ public:
 
     // Sample next token directly on GPU or CPU without full vocab readback
     virtual int sample_token(float temperature = 0.0f, int top_k = 40, float top_p = 0.9f) { return 0; }
+    virtual bool supports_device_sampling() const { return false; }
 
     // State checkpointing and rollback for non-destructive speculative decoding
     virtual void save_state_checkpoint() {}

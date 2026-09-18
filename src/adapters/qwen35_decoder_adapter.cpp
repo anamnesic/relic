@@ -49,8 +49,6 @@ bool Qwen35DecoderAdapter::init(const ArchitectureSpec &spec, int64_t max_seq_le
         size_t max_w_bytes = (size_t)max_layer_elements * sizeof(float);
         size_t max_act_bytes = (size_t)std::max((int64_t)4096, std::max(n_ff, total_qkv)) * sizeof(float);
         gpu_act_a.alloc(cl->dev.context, max_act_bytes);
-        gpu_act_dst.alloc(cl->dev.context, max_act_bytes);
-        gpu_weights.alloc(cl->dev.context, max_w_bytes);
         gpu_norm_w.alloc(cl->dev.context, (size_t)n_embd * sizeof(float));
 
         gpu_hidden.alloc(cl->dev.context, (size_t)n_embd * sizeof(float));
@@ -103,25 +101,8 @@ bool Qwen35DecoderAdapter::init(const ArchitectureSpec &spec, int64_t max_seq_le
             }
         }
 
-        // Initialize AsyncPrefetcher with double staging slots
-        prefetcher = std::make_unique<AsyncPrefetcher>(cl->dev.context, cl->dev.queue);
-        prefetcher->initialize(64 * 1024 * 1024);
-    }
-
-    // Initialize Pinned Host Memory Pool with constant 128 MB sliding staging window
-    pinned_pool = std::make_unique<PinnedHostPool>(128 * 1024 * 1024);
-
-    // Initialize Intel UHD Shared Memory Backend with persistent activation buffers
-    intel_backend = std::make_unique<IntelUhdBackend>();
-    if (!intel_backend->initialize())
-    {
-        intel_backend.reset();
-    }
-    else
-    {
-        size_t max_act_elems = (size_t)std::max(arch.n_vocab, (int64_t)65536);
-        uhd_in_buf_ = intel_backend->allocate(max_act_elems * sizeof(float), MemoryTier::TIER1_SHARED_IGPU);
-        uhd_dst_buf_ = intel_backend->allocate(max_act_elems * sizeof(float), MemoryTier::TIER1_SHARED_IGPU);
+        weights_mgr = std::make_unique<Qwen35WeightsManager>(cl);
+        weights_mgr->init(arch, plan);
     }
 
     return true;
@@ -196,195 +177,14 @@ void Qwen35DecoderAdapter::warm_up(const LlamaModel &model)
 
 void Qwen35DecoderAdapter::ensure_weights_uploaded(const LlamaModel &model)
 {
-    if (!use_gpu || !cl || !cl->initialized || weights_uploaded)
-        return;
-    fprintf(stdout, "Uploading model weights to GPU VRAM (ExecutionPlan guided with On-the-Fly Q4 Repacking)...\n");
-    fflush(stdout);
-    size_t total_uploaded = 0;
-    size_t total_original = 0;
-    size_t total_offloaded_to_host = 0;
-
-    for (const auto &kv : model.tensors)
-    {
-        total_original += kv.second.data.size();
-        size_t uploaded_bytes = 0;
-
-        BackendDeviceType target_dev = BackendDeviceType::NVIDIA_GPU;
-        bool keep_in_vram = true;
-        if (plan_)
-        {
-            auto it = plan_->tensor_placements.find(kv.first);
-            if (it != plan_->tensor_placements.end())
-            {
-                target_dev = it->second.target_device;
-                keep_in_vram = it->second.keep_resident_in_vram;
-            }
-        }
-
-        if (target_dev == BackendDeviceType::INTEL_IGPU && intel_backend)
-        {
-            auto uhd_buf = intel_backend->allocate(kv.second.data.size(), MemoryTier::TIER1_SHARED_IGPU);
-            if (uhd_buf)
-            {
-                intel_backend->upload(*uhd_buf, kv.second.data.data(), kv.second.data.size());
-                intel_tensors[kv.first] = std::move(uhd_buf);
-                total_uploaded += kv.second.data.size();
-            }
-        }
-        else if (target_dev == BackendDeviceType::NVIDIA_GPU && keep_in_vram)
-        {
-            if (kv.first.find("norm") != std::string::npos || kv.first.find("bias") != std::string::npos)
-            {
-                // Pre-dequantize all norm weights to resident F32 in VRAM once!
-                std::vector<float> norm_f32(kv.second.nelements());
-                model.dequantize_to_f32(kv.second, norm_f32.data());
-                if (gpu_store.upload_auto_q4(cl->dev.context, cl->dev.queue, kv.first, norm_f32.data(), norm_f32.size() * sizeof(float), GgmlType::F32, kv.second.nelements(), uploaded_bytes))
-                {
-                    total_uploaded += uploaded_bytes;
-                }
-            }
-            else if (gpu_store.upload_auto_q4(cl->dev.context, cl->dev.queue, kv.first, kv.second.data.data(), kv.second.data.size(), kv.second.type, kv.second.nelements(), uploaded_bytes))
-            {
-                total_uploaded += uploaded_bytes;
-            }
-        }
-        else
-        {
-            // Stored in Host RAM: Allocate in PinnedHostPool for page-locked asynchronous DMA transfers!
-            if (pinned_pool)
-            {
-                void *p = pinned_pool->allocate_pinned(kv.second.data.size());
-                if (p)
-                {
-                    memcpy(p, kv.second.data.data(), kv.second.data.size());
-                    pinned_tensor_ptrs[kv.first] = p;
-                    total_offloaded_to_host += kv.second.data.size();
-                }
-            }
-        }
-    }
-    clFinish(cl->dev.queue);
-    double footprint_red = (total_original > 0) ? ((double)total_original - (double)total_uploaded) / (double)total_original * 100.0 : 0.0;
-    double pcie_red = (plan_) ? plan_->pcie_traffic_reduction_pct : ((total_original > 0) ? ((double)total_uploaded / (double)total_original * 100.0) : 100.0);
-
-    fprintf(stdout, "VRAM Residency active: %.2f MB resident in GPU memory (Footprint Reduction: %.1f%%, PCIe Traffic Reduction: %.1f%%).\n",
-            (double)total_uploaded / (1024.0 * 1024.0), footprint_red, pcie_red);
-    if (total_offloaded_to_host > 0)
-    {
-        fprintf(stdout, "[ExecutionPlan Sub-Layer Offload] %.2f MB managed in Pinned Host RAM via AsyncPrefetcher staging.\n",
-                (double)total_offloaded_to_host / (1024.0 * 1024.0));
-    }
-    fflush(stdout);
-    weights_uploaded = true;
+    if (weights_mgr)
+        weights_mgr->ensure_weights_uploaded(model);
 }
 
 void Qwen35DecoderAdapter::dispatch_gemv(ClBuffer &dst, ClBuffer &in, const std::string &name, const LlamaModel::Tensor &t, int64_t N, int64_t K, int64_t layer_idx)
 {
-    // 1. Check if resident in dedicated VRAM
-    ClBuffer *w_buf = gpu_store.get(name);
-    GgmlType actual_type = gpu_store.get_type(name, t.type);
-    if (w_buf)
-    {
-        if (actual_type == GgmlType::Q4_0)
-        {
-            cl->gemv_q4_0(dst, in, *w_buf, N, K);
-            return;
-        }
-        else if (actual_type == GgmlType::Q8_0)
-        {
-            cl->gemv_q8_0(dst, in, *w_buf, N, K);
-            return;
-        }
-        else if (actual_type == GgmlType::F32)
-        {
-            cl->gemv_f32_nt(dst, in, *w_buf, N, K);
-            return;
-        }
-    }
-
-    // 2. Check if resident on Intel UHD shared memory
-    auto uhd_it = intel_tensors.find(name);
-    if (uhd_it != intel_tensors.end() && intel_backend && uhd_in_buf_ && uhd_dst_buf_)
-    {
-        if (weights.size() < (size_t)std::max(N, K))
-            weights.resize((size_t)std::max(N, K));
-
-        clEnqueueReadBuffer(cl->dev.queue, in.mem, CL_TRUE, 0, (size_t)(K * sizeof(float)), weights.data(), 0, nullptr, nullptr);
-        intel_backend->upload(*uhd_in_buf_, weights.data(), (size_t)(K * sizeof(float)));
-        if (t.type == GgmlType::Q4_0)
-        {
-            intel_backend->gemv_q4_0(*uhd_dst_buf_, *uhd_in_buf_, *(uhd_it->second), N, K);
-        }
-        else if (t.type == GgmlType::Q8_0)
-        {
-            intel_backend->gemv_q8_0(*uhd_dst_buf_, *uhd_in_buf_, *(uhd_it->second), N, K);
-        }
-        intel_backend->synchronize();
-        intel_backend->download(weights.data(), *uhd_dst_buf_, (size_t)(N * sizeof(float)));
-        clEnqueueWriteBuffer(cl->dev.queue, dst.mem, CL_TRUE, 0, (size_t)(N * sizeof(float)), weights.data(), 0, nullptr, nullptr);
-        return;
-    }
-
-    // 3. Check if stored in Pinned Host Pool (AsyncPrefetcher DMA Stream)
-    auto pin_it = pinned_tensor_ptrs.find(name);
-    if (pin_it != pinned_tensor_ptrs.end() && prefetcher)
-    {
-        int slot = (int)(layer_idx % 2);
-        size_t raw_bytes = t.data.size();
-        bool overlap_enabled = plan_ ? plan_->enable_dma_overlap : true;
-
-        if (overlap_enabled)
-        {
-            prefetcher->prefetch_async(pin_it->second, raw_bytes, slot);
-            prefetcher->wait_ready(slot);
-            cl_mem staging_mem = prefetcher->get_staging_mem(slot);
-            if (staging_mem)
-            {
-                ClBuffer staging_buf = ClBuffer::borrow(staging_mem, raw_bytes);
-                if (t.type == GgmlType::Q4_0)
-                {
-                    cl->gemv_q4_0(dst, in, staging_buf, N, K);
-                    return;
-                }
-                else if (t.type == GgmlType::Q8_0)
-                {
-                    cl->gemv_q8_0(dst, in, staging_buf, N, K);
-                    return;
-                }
-            }
-        }
-        else
-        {
-            cl_mem staging_mem = prefetcher->get_staging_mem(slot);
-            if (staging_mem)
-            {
-                clEnqueueWriteBuffer(cl->dev.queue, staging_mem, CL_TRUE, 0, raw_bytes, pin_it->second, 0, nullptr, nullptr);
-                clFinish(cl->dev.queue);
-                ClBuffer staging_buf = ClBuffer::borrow(staging_mem, raw_bytes);
-                if (t.type == GgmlType::Q4_0)
-                {
-                    cl->gemv_q4_0(dst, in, staging_buf, N, K);
-                    return;
-                }
-                else if (t.type == GgmlType::Q8_0)
-                {
-                    cl->gemv_q8_0(dst, in, staging_buf, N, K);
-                    return;
-                }
-            }
-        }
-    }
-
-    // Fallback: chunked dequantization to staging buffer
-    const int64_t chunk_n = 4096;
-    for (int64_t start_n = 0; start_n < N; start_n += chunk_n)
-    {
-        int64_t cur_n = std::min(chunk_n, N - start_n);
-        model_dequant_rows(t, start_n, cur_n, weights.data());
-        clEnqueueWriteBuffer(cl->dev.queue, gpu_weights.mem, CL_FALSE, 0, (size_t)(cur_n * K * sizeof(float)), weights.data(), 0, nullptr, nullptr);
-        cl->matmul_f32_nt(gpu_act_dst, in, gpu_weights, 1, cur_n, K);
-        clEnqueueCopyBuffer(cl->dev.queue, gpu_act_dst.mem, dst.mem, 0, (size_t)(start_n * sizeof(float)), (size_t)(cur_n * sizeof(float)), 0, nullptr, nullptr);
-    }
+    if (weights_mgr)
+        weights_mgr->dispatch_gemv(dst, in, name, t, N, K, layer_idx);
 }
 
 void Qwen35DecoderAdapter::model_dequant_rows(const LlamaModel::Tensor &t, int64_t start_row, int64_t num_rows, float *out)
@@ -392,62 +192,12 @@ void Qwen35DecoderAdapter::model_dequant_rows(const LlamaModel::Tensor &t, int64
     int64_t row_size = t.dims.empty() ? t.nelements() : t.dims[0];
     int64_t total_rows = t.dims.size() > 1 ? t.dims[1] : (row_size > 0 ? t.nelements() / row_size : 1);
     num_rows = std::min(num_rows, total_rows - start_row);
-    if (num_rows <= 0)
-        return;
-
-    if (t.type == GgmlType::F32)
-    {
-        memcpy(out, ((const float *)t.data.data()) + start_row * row_size, (size_t)(num_rows * row_size * sizeof(float)));
-    }
-    else if (t.type == GgmlType::Q8_0)
-    {
-        size_t bytes_per_row = (size_t)((row_size + 31) / 32) * 34;
-        for (int64_t r = 0; r < num_rows; r++)
-        {
-            const uint8_t *src_row = t.data.data() + (start_row + r) * bytes_per_row;
-            float *dst_row = out + r * row_size;
-            int n_blocks = (int)(row_size / 32);
-            for (int b = 0; b < n_blocks; b++)
-            {
-                const uint8_t *b_ptr = src_row + b * 34;
-                uint16_t d_bits = (uint16_t)b_ptr[0] | ((uint16_t)b_ptr[1] << 8);
-                float d = float_to_half_val(d_bits);
-                const int8_t *qs = (const int8_t *)(b_ptr + 2);
-                for (int i = 0; i < 32; i++)
-                {
-                    dst_row[b * 32 + i] = (float)qs[i] * d;
-                }
-            }
-        }
-    }
+    relic::quant::dequantize_rows(t.type, t.data.data(), row_size, start_row, num_rows, out);
 }
 
 float Qwen35DecoderAdapter::float_to_half_val(uint16_t h)
 {
-    uint32_t sign = ((uint32_t)h >> 15) & 1;
-    uint32_t exp = ((uint32_t)h >> 10) & 0x1f;
-    uint32_t mant = (uint32_t)h & 0x3ff;
-    if (exp == 0)
-    {
-        if (mant == 0)
-            return sign ? -0.0f : 0.0f;
-        while ((mant & 0x400) == 0)
-        {
-            mant <<= 1;
-            exp--;
-        }
-        exp++;
-        mant &= 0x3ff;
-    }
-    else if (exp == 31)
-    {
-        return (mant == 0) ? (sign ? -INFINITY : INFINITY) : NAN;
-    }
-    exp = exp + (127 - 15);
-    uint32_t u = (sign << 31) | (exp << 23) | (mant << 13);
-    float f;
-    memcpy(&f, &u, 4);
-    return f;
+    return relic::quant::half_bits_to_float(h);
 }
 
 int Qwen35DecoderAdapter::forward(const LlamaModel &model, int token_id, int64_t position, float *logits, bool compute_output)
@@ -507,8 +257,8 @@ int Qwen35DecoderAdapter::forward(const LlamaModel &model, int token_id, int64_t
     if (use_gpu && cl && cl->initialized)
     {
         std::string emb_name = (emb_it->first == "token_embd.weight") ? "token_embd.weight" : "tok_embeddings.weight";
-        ClBuffer *emb_buf = gpu_store.get(emb_name);
-        GgmlType emb_type = gpu_store.get_type(emb_name, embed.type);
+        ClBuffer *emb_buf = weights_mgr->get_tensor_buffer(emb_name);
+        GgmlType emb_type = weights_mgr->get_tensor_type(emb_name, embed.type);
         if (emb_buf && emb_type == GgmlType::Q4_0)
         {
             cl->embed_lookup(gpu_hidden, *emb_buf, token_id, n_embd);
@@ -536,11 +286,11 @@ int Qwen35DecoderAdapter::forward(const LlamaModel &model, int token_id, int64_t
             cl->copy(gpu_residual, gpu_hidden, n_embd);
 
             std::string norm_name = prefix + "attn_norm.weight";
-            ClBuffer *attn_norm_buf = gpu_store.get(norm_name);
+            ClBuffer *attn_norm_buf = weights_mgr->get_tensor_buffer(norm_name);
             if (!attn_norm_buf)
             {
                 norm_name = prefix + "norm.weight";
-                attn_norm_buf = gpu_store.get(norm_name);
+                attn_norm_buf = weights_mgr->get_tensor_buffer(norm_name);
             }
             if (attn_norm_buf)
             {
@@ -569,12 +319,12 @@ int Qwen35DecoderAdapter::forward(const LlamaModel &model, int token_id, int64_t
                 }
 
                 // Per-head RMSNorm on Q and K
-                ClBuffer *q_norm = gpu_store.get(prefix + "attn_q_norm.weight");
+                ClBuffer *q_norm = weights_mgr->get_tensor_buffer(prefix + "attn_q_norm.weight");
                 if (q_norm)
                 {
                     cl->qwen_qk_norm(gpu_q, gpu_q, *q_norm, n_head, head_dim, arch.norm_eps);
                 }
-                ClBuffer *k_norm = gpu_store.get(prefix + "attn_k_norm.weight");
+                ClBuffer *k_norm = weights_mgr->get_tensor_buffer(prefix + "attn_k_norm.weight");
                 if (k_norm)
                 {
                     cl->qwen_qk_norm(gpu_k, gpu_k, *k_norm, n_kv_head, head_dim, arch.norm_eps);
@@ -634,7 +384,7 @@ int Qwen35DecoderAdapter::forward(const LlamaModel &model, int token_id, int64_t
                 }
 
                 // Pure GPU in-VRAM Conv1D
-                ClBuffer *w_conv_buf = gpu_store.get(prefix + "ssm_conv1d.weight");
+                ClBuffer *w_conv_buf = weights_mgr->get_tensor_buffer(prefix + "ssm_conv1d.weight");
                 if (w_conv_buf)
                 {
                     cl->qwen_conv1d(gpu_conv_states[layer], gpu_conv_in, *w_conv_buf, gpu_conv_out, total_qkv);
@@ -646,10 +396,10 @@ int Qwen35DecoderAdapter::forward(const LlamaModel &model, int token_id, int64_t
 
                 // Fused Recurrent DeltaNet Step + SSM Norm + SiLU Gate + Multiply
                 std::string ssm_norm_name = prefix + "ssm_norm.weight";
-                ClBuffer *ssm_norm_buf = gpu_store.get(ssm_norm_name);
+                ClBuffer *ssm_norm_buf = weights_mgr->get_tensor_buffer(ssm_norm_name);
                 ClBuffer *attn_gate_buf = (w_gate != model.tensors.end()) ? &gpu_gate : nullptr;
-                ClBuffer *ssm_a_buf = gpu_store.get(prefix + "ssm_a");
-                ClBuffer *ssm_dt_buf = gpu_store.get(prefix + "ssm_dt");
+                ClBuffer *ssm_a_buf = weights_mgr->get_tensor_buffer(prefix + "ssm_a");
+                ClBuffer *ssm_dt_buf = weights_mgr->get_tensor_buffer(prefix + "ssm_dt");
 
                 cl->qwen_deltanet_fused(gpu_ssm_states[layer], gpu_conv_out, gpu_alpha, gpu_beta,
                                         ssm_a_buf, ssm_dt_buf,
@@ -672,11 +422,11 @@ int Qwen35DecoderAdapter::forward(const LlamaModel &model, int token_id, int64_t
             cl->copy(gpu_residual, gpu_hidden, n_embd);
 
             std::string ffn_norm_name = prefix + "ffn_norm.weight";
-            ClBuffer *ffn_norm_buf = gpu_store.get(ffn_norm_name);
+            ClBuffer *ffn_norm_buf = weights_mgr->get_tensor_buffer(ffn_norm_name);
             if (!ffn_norm_buf)
             {
                 ffn_norm_name = prefix + "post_attention_norm.weight";
-                ffn_norm_buf = gpu_store.get(ffn_norm_name);
+                ffn_norm_buf = weights_mgr->get_tensor_buffer(ffn_norm_name);
             }
             if (ffn_norm_buf)
             {
@@ -687,10 +437,10 @@ int Qwen35DecoderAdapter::forward(const LlamaModel &model, int token_id, int64_t
             auto w_up = model.tensors.find(prefix + "ffn_up.weight");
             if (w_gate != model.tensors.end() && w_up != model.tensors.end())
             {
-                ClBuffer *gate_buf = gpu_store.get(prefix + "ffn_gate.weight");
-                ClBuffer *up_buf = gpu_store.get(prefix + "ffn_up.weight");
-                GgmlType gate_type = gpu_store.get_type(prefix + "ffn_gate.weight", w_gate->second.type);
-                GgmlType up_type = gpu_store.get_type(prefix + "ffn_up.weight", w_up->second.type);
+                ClBuffer *gate_buf = weights_mgr->get_tensor_buffer(prefix + "ffn_gate.weight");
+                ClBuffer *up_buf = weights_mgr->get_tensor_buffer(prefix + "ffn_up.weight");
+                GgmlType gate_type = weights_mgr->get_tensor_type(prefix + "ffn_gate.weight", w_gate->second.type);
+                GgmlType up_type = weights_mgr->get_tensor_type(prefix + "ffn_up.weight", w_up->second.type);
                 if (gate_buf && up_buf && gate_type == GgmlType::Q4_0 && up_type == GgmlType::Q4_0)
                 {
                     cl->gemv_q4_0_ffn_swiglu(gpu_ffn_act, gpu_hidden, *gate_buf, *up_buf, n_ff, n_embd);
@@ -712,9 +462,9 @@ int Qwen35DecoderAdapter::forward(const LlamaModel &model, int token_id, int64_t
         }
 
         // Final RMSNorm
-        ClBuffer *out_norm_buf = gpu_store.get("output_norm.weight");
+        ClBuffer *out_norm_buf = weights_mgr->get_tensor_buffer("output_norm.weight");
         if (!out_norm_buf)
-            out_norm_buf = gpu_store.get("norm.weight");
+            out_norm_buf = weights_mgr->get_tensor_buffer("norm.weight");
         if (out_norm_buf)
         {
             cl->rms_norm(gpu_hidden, gpu_hidden, *out_norm_buf, n_embd, 1);

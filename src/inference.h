@@ -2,7 +2,6 @@
 #include "architecture.h"
 #include "decoder.h"
 #include "model.h"
-#include "opencl_backend.h"
 #include "tokenizer.h"
 #include <cstdint>
 #include <memory>
@@ -10,12 +9,12 @@
 #include <vector>
 
 struct ExecutionPlan;
+class OpenClBackend;
 
 struct InferenceEngine
 {
-    LlamaModel *model = nullptr;
+    NeuralModel *model = nullptr;
     Tokenizer *tokenizer = nullptr;
-    OpenClBackend *cl = nullptr;
     const ExecutionPlan *plan = nullptr;
     std::unique_ptr<ArchitectureDecoder> decoder;
     int64_t max_seq_len = 2048;
@@ -25,7 +24,12 @@ struct InferenceEngine
     int speculative_ngram = 3;
     int speculative_max_draft = 3;
 
-    bool init(LlamaModel *m, Tokenizer *tok, OpenClBackend *backend,
+    // Pure Hexagonal Port injection: inject concrete decoder adapter directly
+    bool init(NeuralModel *m, Tokenizer *tok, std::unique_ptr<ArchitectureDecoder> dec,
+              int64_t max_seq_len = 2048, const ExecutionPlan *plan = nullptr);
+
+    // Convenience factory overload
+    bool init(NeuralModel *m, Tokenizer *tok, OpenClBackend *backend,
               int64_t max_seq_len = 2048, const ExecutionPlan *plan = nullptr);
     void free_buffers();
 
