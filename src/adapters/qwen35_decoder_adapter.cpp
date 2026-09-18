@@ -103,6 +103,9 @@ bool Qwen35DecoderAdapter::init(const ArchitectureSpec &spec, int64_t max_seq_le
 
         weights_mgr = std::make_unique<Qwen35WeightsManager>(cl);
         weights_mgr->init(arch, plan);
+        recurrent_block = std::make_unique<Qwen35RecurrentBlock>(cl, weights_mgr.get());
+        attention_block = std::make_unique<Qwen35AttentionBlock>(cl, weights_mgr.get());
+        mlp_block = std::make_unique<Qwen35MlpBlock>(cl, weights_mgr.get());
     }
 
     return true;
@@ -299,166 +302,25 @@ int Qwen35DecoderAdapter::forward(const LlamaModel &model, int token_id, int64_t
 
             if (is_full_attn)
             {
-                auto w_Q = model.tensors.find(prefix + "attn_q.weight");
-                auto w_K = model.tensors.find(prefix + "attn_k.weight");
-                auto w_V = model.tensors.find(prefix + "attn_v.weight");
-                auto w_O = model.tensors.find(prefix + "attn_output.weight");
-
-                if (w_Q != model.tensors.end())
-                {
-                    dispatch_gemv(gpu_q_full, gpu_hidden, prefix + "attn_q.weight", w_Q->second, 2 * q_size, n_embd, layer);
-                    cl->qwen_deinterleave_q_gate(gpu_q_full, gpu_q, gpu_attn_gate, n_head, head_dim);
-                }
-                if (w_K != model.tensors.end())
-                {
-                    dispatch_gemv(gpu_k, gpu_hidden, prefix + "attn_k.weight", w_K->second, kv_size, n_embd, layer);
-                }
-                if (w_V != model.tensors.end())
-                {
-                    dispatch_gemv(gpu_v, gpu_hidden, prefix + "attn_v.weight", w_V->second, kv_size, n_embd, layer);
-                }
-
-                // Per-head RMSNorm on Q and K
-                ClBuffer *q_norm = weights_mgr->get_tensor_buffer(prefix + "attn_q_norm.weight");
-                if (q_norm)
-                {
-                    cl->qwen_qk_norm(gpu_q, gpu_q, *q_norm, n_head, head_dim, arch.norm_eps);
-                }
-                ClBuffer *k_norm = weights_mgr->get_tensor_buffer(prefix + "attn_k_norm.weight");
-                if (k_norm)
-                {
-                    cl->qwen_qk_norm(gpu_k, gpu_k, *k_norm, n_kv_head, head_dim, arch.norm_eps);
-                }
-
-                // RoPE with rope_dimension_count and rope_freq_base
-                cl->rope(gpu_q, q_size, n_head, position, 1, arch.rope_freq_base, arch.rope_dimension_count);
-                cl->rope(gpu_k, kv_size, n_kv_head, position, 1, arch.rope_freq_base, arch.rope_dimension_count);
-
-                // Copy K and V to cache at position
-                size_t kv_bytes = (size_t)(kv_size * sizeof(float));
-                size_t kv_offset = (size_t)(position * kv_bytes);
-                clEnqueueCopyBuffer(cl->dev.queue, gpu_k.mem, gpu_k_caches[layer].mem, 0, kv_offset, kv_bytes, 0, nullptr, nullptr);
-                clEnqueueCopyBuffer(cl->dev.queue, gpu_v.mem, gpu_v_caches[layer].mem, 0, kv_offset, kv_bytes, 0, nullptr, nullptr);
-
-                // Pure GPU Causal Full Attention
-                cl->qwen_attention_step(gpu_q, gpu_k_caches[layer], gpu_v_caches[layer],
-                                        gpu_attn_out, n_head, n_kv_head, head_dim, position, seq_limit);
-
-                // Sigmoid Attention Gate Multiply: attn_out = attn_out * sigmoid(gate)
-                cl->qwen_attn_gate_mul(gpu_attn_out, gpu_attn_gate, q_size);
-
-                if (w_O != model.tensors.end())
-                {
-                    dispatch_gemv(gpu_gate, gpu_attn_out, prefix + "attn_output.weight", w_O->second, n_embd, n_embd, layer);
-                    cl->copy(gpu_attn_out, gpu_gate, n_embd);
-                }
-
-                cl->add(gpu_hidden, gpu_residual, gpu_attn_out, n_embd);
+                attention_block->forward(layer, position, seq_limit, arch, model,
+                                         gpu_hidden, gpu_residual, gpu_attn_out,
+                                         gpu_q_full, gpu_q, gpu_attn_gate,
+                                         gpu_k, gpu_v, gpu_gate,
+                                         gpu_k_caches[layer], gpu_v_caches[layer],
+                                         q_size, kv_size, n_head, n_kv_head, head_dim);
             }
             else
             {
-                auto w_qkv = model.tensors.find(prefix + "attn_qkv.weight");
-                auto w_gate = model.tensors.find(prefix + "attn_gate.weight");
-                auto w_alpha = model.tensors.find(prefix + "ssm_alpha.weight");
-                auto w_beta = model.tensors.find(prefix + "ssm_beta.weight");
-                auto w_O = model.tensors.find(prefix + "ssm_out.weight");
-                if (w_O == model.tensors.end())
-                    w_O = model.tensors.find(prefix + "attn_output.weight");
-
-                if (w_qkv != model.tensors.end())
-                {
-                    int64_t act_qkv = w_qkv->second.dims.size() > 1 ? w_qkv->second.dims[1] : total_qkv;
-                    dispatch_gemv(gpu_conv_in, gpu_hidden, prefix + "attn_qkv.weight", w_qkv->second, act_qkv, n_embd, layer);
-                }
-                if (w_gate != model.tensors.end())
-                {
-                    dispatch_gemv(gpu_gate, gpu_hidden, prefix + "attn_gate.weight", w_gate->second, linear_inner, n_embd, layer);
-                }
-                if (w_alpha != model.tensors.end())
-                {
-                    dispatch_gemv(gpu_alpha, gpu_hidden, prefix + "ssm_alpha.weight", w_alpha->second, value_heads, n_embd, layer);
-                }
-                if (w_beta != model.tensors.end())
-                {
-                    dispatch_gemv(gpu_beta, gpu_hidden, prefix + "ssm_beta.weight", w_beta->second, value_heads, n_embd, layer);
-                }
-
-                // Pure GPU in-VRAM Conv1D
-                ClBuffer *w_conv_buf = weights_mgr->get_tensor_buffer(prefix + "ssm_conv1d.weight");
-                if (w_conv_buf)
-                {
-                    cl->qwen_conv1d(gpu_conv_states[layer], gpu_conv_in, *w_conv_buf, gpu_conv_out, total_qkv);
-                }
-                else
-                {
-                    cl->copy(gpu_conv_out, gpu_conv_in, total_qkv);
-                }
-
-                // Fused Recurrent DeltaNet Step + SSM Norm + SiLU Gate + Multiply
-                std::string ssm_norm_name = prefix + "ssm_norm.weight";
-                ClBuffer *ssm_norm_buf = weights_mgr->get_tensor_buffer(ssm_norm_name);
-                ClBuffer *attn_gate_buf = (w_gate != model.tensors.end()) ? &gpu_gate : nullptr;
-                ClBuffer *ssm_a_buf = weights_mgr->get_tensor_buffer(prefix + "ssm_a");
-                ClBuffer *ssm_dt_buf = weights_mgr->get_tensor_buffer(prefix + "ssm_dt");
-
-                cl->qwen_deltanet_fused(gpu_ssm_states[layer], gpu_conv_out, gpu_alpha, gpu_beta,
-                                        ssm_a_buf, ssm_dt_buf,
-                                        ssm_norm_buf, attn_gate_buf, gpu_delta_out,
-                                        key_dim, qk_dim, linear_inner, arch.norm_eps);
-
-                if (w_O != model.tensors.end())
-                {
-                    dispatch_gemv(gpu_attn_out, gpu_delta_out, prefix + "ssm_out.weight", w_O->second, n_embd, linear_inner, layer);
-                }
-                else
-                {
-                    cl->copy(gpu_attn_out, gpu_delta_out, std::min(n_embd, linear_inner));
-                }
-
-                cl->add(gpu_hidden, gpu_residual, gpu_attn_out, n_embd);
+                recurrent_block->forward(layer, arch, model,
+                                         gpu_hidden, gpu_residual, gpu_attn_out,
+                                         gpu_conv_in, gpu_conv_out, gpu_delta_out,
+                                         gpu_gate, gpu_alpha, gpu_beta,
+                                         gpu_ssm_states[layer], gpu_conv_states[layer],
+                                         total_qkv, key_dim, qk_dim, linear_inner, value_heads);
             }
 
-            // FFN
-            cl->copy(gpu_residual, gpu_hidden, n_embd);
-
-            std::string ffn_norm_name = prefix + "ffn_norm.weight";
-            ClBuffer *ffn_norm_buf = weights_mgr->get_tensor_buffer(ffn_norm_name);
-            if (!ffn_norm_buf)
-            {
-                ffn_norm_name = prefix + "post_attention_norm.weight";
-                ffn_norm_buf = weights_mgr->get_tensor_buffer(ffn_norm_name);
-            }
-            if (ffn_norm_buf)
-            {
-                cl->rms_norm(gpu_hidden, gpu_hidden, *ffn_norm_buf, n_embd, 1);
-            }
-
-            auto w_gate = model.tensors.find(prefix + "ffn_gate.weight");
-            auto w_up = model.tensors.find(prefix + "ffn_up.weight");
-            if (w_gate != model.tensors.end() && w_up != model.tensors.end())
-            {
-                ClBuffer *gate_buf = weights_mgr->get_tensor_buffer(prefix + "ffn_gate.weight");
-                ClBuffer *up_buf = weights_mgr->get_tensor_buffer(prefix + "ffn_up.weight");
-                GgmlType gate_type = weights_mgr->get_tensor_type(prefix + "ffn_gate.weight", w_gate->second.type);
-                GgmlType up_type = weights_mgr->get_tensor_type(prefix + "ffn_up.weight", w_up->second.type);
-                if (gate_buf && up_buf && gate_type == GgmlType::Q4_0 && up_type == GgmlType::Q4_0)
-                {
-                    cl->gemv_q4_0_ffn_swiglu(gpu_ffn_act, gpu_hidden, *gate_buf, *up_buf, n_ff, n_embd);
-                }
-                else
-                {
-                    dispatch_gemv(gpu_gate, gpu_hidden, prefix + "ffn_gate.weight", w_gate->second, n_ff, n_embd, layer);
-                    dispatch_gemv(gpu_up, gpu_hidden, prefix + "ffn_up.weight", w_up->second, n_ff, n_embd, layer);
-                    cl->swiglu(gpu_ffn_act, gpu_gate, gpu_up, n_ff);
-                }
-
-                auto w_down = model.tensors.find(prefix + "ffn_down.weight");
-                if (w_down != model.tensors.end())
-                {
-                    dispatch_gemv(gpu_hidden, gpu_ffn_act, prefix + "ffn_down.weight", w_down->second, n_embd, n_ff, layer);
-                }
-                cl->add(gpu_hidden, gpu_residual, gpu_hidden, n_embd);
-            }
+            mlp_block->forward(layer, arch, model, gpu_hidden, gpu_residual,
+                               gpu_ffn_act, gpu_gate, gpu_up);
         }
 
         // Final RMSNorm

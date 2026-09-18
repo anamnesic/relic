@@ -4,6 +4,9 @@
 #include "opencl_backend.h"
 #include "qwen35_state.h"
 #include "qwen35_weights_manager.h"
+#include "qwen35_recurrent_block.h"
+#include "qwen35_attention_block.h"
+#include "qwen35_mlp_block.h"
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -41,6 +44,9 @@ private:
     std::vector<float> full_attn_kv;
 
     std::unique_ptr<Qwen35WeightsManager> weights_mgr;
+    std::unique_ptr<Qwen35RecurrentBlock> recurrent_block;
+    std::unique_ptr<Qwen35AttentionBlock> attention_block;
+    std::unique_ptr<Qwen35MlpBlock> mlp_block;
 
     ClBuffer gpu_hidden;
     ClBuffer gpu_residual;

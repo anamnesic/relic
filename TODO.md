@@ -191,16 +191,25 @@
   - [x] Centralize FP16 conversion (`float_to_half_bits`, `float_to_half_val`, `half_bits_to_float`).
   - [x] Centralize block and row dequantization for Q8_0, Q4_0, and F32.
   - [x] Deduplicate `model_dequant_rows` across `Qwen35DecoderAdapter`, `model.h`, and `model.cpp`.
-- [ ] **3. Internal Decomposition of `Qwen35DecoderAdapter` (SRP & Cohesion)**:
+- [x] **3. Internal Decomposition of `Qwen35DecoderAdapter` (SRP & Cohesion)**:
   - [x] Extract `Qwen35WeightsManager` (`src/adapters/qwen35_weights_manager.{h,cpp}`): Weight uploading, VRAM placement, Q8_0 $\to$ Q4_0 on-the-fly repacking, and GEMV dispatch.
-  - [ ] Extract `Qwen35RecurrentBlock` (`src/adapters/qwen35_recurrent_block.{h,cpp}`): Gated DeltaNet SSM Conv1d and recurrent state steps.
-  - [ ] Extract `Qwen35AttentionBlock` (`src/adapters/qwen35_attention_block.{h,cpp}`): Full self-attention, RoPE, KV cache append, and scaled dot-product.
-  - [ ] Extract `Qwen35MlpBlock` (`src/adapters/qwen35_mlp_block.{h,cpp}`): SwiGLU FFN gating and down-projection.
+  - [x] Extract `Qwen35RecurrentBlock` (`src/adapters/qwen35_recurrent_block.{h,cpp}`): Gated DeltaNet SSM Conv1d and recurrent state steps.
+  - [x] Extract `Qwen35AttentionBlock` (`src/adapters/qwen35_attention_block.{h,cpp}`): Full self-attention, RoPE, KV cache append, and scaled dot-product.
+  - [x] Extract `Qwen35MlpBlock` (`src/adapters/qwen35_mlp_block.{h,cpp}`): SwiGLU FFN gating and down-projection.
 - [ ] **4. Unified Backend Device Interface**:
   - [ ] Align `OpenClBackend` with `Backend` interface from `src/backends/backend.h`.
   - [ ] Unify `ClBuffer` under `BackendBuffer`.
 - [x] **5. Ubiquitous Domain Language**:
   - [x] Introduce `using NeuralModel = LlamaModel;` domain abstraction.
+
+---
+
+### 🚀 Phase 6: Performance Engineering & Memory Bandwidth Saturation (Target: 35–60 tok/s)
+- [ ] **1. Vectorized 128-Bit Memory Transactions in GEMV Q4_0**:
+  - [ ] Implement 128-bit (`uint4` / `vload4`) aligned block reads in `gemv_q4_0` and `gemv_q4_0_ffn_swiglu`.
+  - [ ] Minimize register pressure and memory pipeline stalls on NVIDIA Turing SM 75 architecture.
+- [ ] **2. Intra-Layer Kernel Fusion**:
+  - [ ] Fuse Residual Add + RMSNorm into a single dispatch.
 
 ---
 

@@ -19,6 +19,9 @@ add_executable(relic
     src/adapters/llama_decoder_adapter.cpp
     src/adapters/qwen35_decoder_adapter.cpp
     src/adapters/qwen35_weights_manager.cpp
+    src/adapters/qwen35_recurrent_block.cpp
+    src/adapters/qwen35_attention_block.cpp
+    src/adapters/qwen35_mlp_block.cpp
     src/model.cpp
     src/opencl_backend.cpp
     src/tokenizer.cpp
@@ -46,6 +49,9 @@ add_executable(relic_test
     src/adapters/llama_decoder_adapter.cpp
     src/adapters/qwen35_decoder_adapter.cpp
     src/adapters/qwen35_weights_manager.cpp
+    src/adapters/qwen35_recurrent_block.cpp
+    src/adapters/qwen35_attention_block.cpp
+    src/adapters/qwen35_mlp_block.cpp
     src/model.cpp
     src/planner/hardware_profile.cpp
     src/planner/adaptive_planner.cpp
