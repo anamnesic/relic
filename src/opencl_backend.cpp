@@ -481,6 +481,7 @@ void OpenClBackend::gemv_q4_0(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t N
     cl_int n = (cl_int)N, k = (cl_int)K;
     clSetKernelArg(knl.kernel, 3, sizeof(cl_int), &n);
     clSetKernelArg(knl.kernel, 4, sizeof(cl_int), &k);
+    clSetKernelArg(knl.kernel, 5, (size_t)K * sizeof(float), nullptr);
 
     size_t local = 64;
     size_t n_groups = ((size_t)N + 7) / 8;
@@ -501,6 +502,7 @@ void OpenClBackend::gemv_q4_0_ffn_swiglu(ClBuffer &dst, ClBuffer &a, ClBuffer &b
     cl_int n = (cl_int)N, k = (cl_int)K;
     clSetKernelArg(knl.kernel, 4, sizeof(cl_int), &n);
     clSetKernelArg(knl.kernel, 5, sizeof(cl_int), &k);
+    clSetKernelArg(knl.kernel, 6, (size_t)K * sizeof(float), nullptr);
 
     size_t local = 64;
     size_t n_groups = ((size_t)N + 7) / 8;

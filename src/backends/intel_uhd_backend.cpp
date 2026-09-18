@@ -288,6 +288,7 @@ void IntelUhdBackend::gemv_q4_0(BackendBuffer &dst, BackendBuffer &a, BackendBuf
     clSetKernelArg(k, 2, sizeof(cl_mem), &m_dst);
     clSetKernelArg(k, 3, sizeof(cl_int), &n);
     clSetKernelArg(k, 4, sizeof(cl_int), &kk);
+    clSetKernelArg(k, 5, (size_t)kk * sizeof(float), nullptr);
 
     size_t local = 32;
     size_t n_groups = ((size_t)N + 15) / 16;
@@ -349,6 +350,7 @@ void IntelUhdBackend::gemv_q4_0_fused_ffn(BackendBuffer &dst, BackendBuffer &a, 
     clSetKernelArg(k, 3, sizeof(cl_mem), &m_dst);
     clSetKernelArg(k, 4, sizeof(cl_int), &n);
     clSetKernelArg(k, 5, sizeof(cl_int), &kk);
+    clSetKernelArg(k, 6, (size_t)kk * sizeof(float), nullptr);
 
     size_t local = 32;
     size_t n_groups = ((size_t)N + 7) / 8;

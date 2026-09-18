@@ -303,16 +303,16 @@ kernel void gemv_q8_0(
 
 //------------------------------------------------------------------------------
 //------------------------------------------------------------------------------
-// MULTI-ROW 8x GEMV Q4_0: 2-Warp Tiled Execution with Local Activation Cache
+// MULTI-ROW 8x GEMV Q4_0: 2-Warp Tiled Execution with Dynamic Local Activation Cache
 //------------------------------------------------------------------------------
 kernel void gemv_q4_0(
     global const float *a,
     global const uchar *b,
     global float *dst,
     int N,
-    int K
+    int K,
+    local float *l_a
 ) {
-    local float l_a[6144];
     local float l_sum0[2][32];
     local float l_sum1[2][32];
     local float l_sum2[2][32];
@@ -329,13 +329,11 @@ kernel void gemv_q4_0(
     int row2 = base_row + 2;
     int row3 = base_row + 3;
 
-    // Cache vector 'a' into on-chip shared memory when K <= 6144
-    if (K <= 6144) {
-        for (int i = tid; i < K; i += wg_size) {
-            l_a[i] = a[i];
-        }
-        barrier(CLK_LOCAL_MEM_FENCE);
+    // Cache vector 'a' into on-chip shared memory dynamically sized to K
+    for (int i = tid; i < K; i += wg_size) {
+        l_a[i] = a[i];
     }
+    barrier(CLK_LOCAL_MEM_FENCE);
 
     int n_blocks = K / 32;
     global const uchar *row_ptr0 = b + (size_t)row0 * (size_t)(n_blocks * 18);
@@ -362,68 +360,58 @@ kernel void gemv_q4_0(
         float d3 = fp16_to_fp32((ushort)b_blk3[0] | ((ushort)b_blk3[1] << 8));
         global const uchar *qs3 = b_blk3 + 2;
 
-        float block_acc0 = 0.0f, block_acc1 = 0.0f, block_acc2 = 0.0f, block_acc3 = 0.0f;
-        float sum_a = 0.0f;
+        // Issue 128-bit vector loads upfront into private registers
+        uchar16 qb0 = vload16(0, qs0);
+        uchar16 qb1 = vload16(0, qs1);
+        uchar16 qb2 = vload16(0, qs2);
+        uchar16 qb3 = vload16(0, qs3);
 
-        if (K <= 6144) {
-            local const float *a_blk = l_a + blk * 32;
-            for (int i = 0; i < 4; i++) {
-                float4 a_lo = vload4(i, a_blk);
-                float4 a_hi = vload4(i + 4, a_blk);
-                sum_a += a_lo.x + a_lo.y + a_lo.z + a_lo.w +
-                         a_hi.x + a_hi.y + a_hi.z + a_hi.w;
+        local const float *a_blk = l_a + blk * 32;
+        float4 a0 = vload4(0, a_blk);
+        float4 a1 = vload4(1, a_blk);
+        float4 a2 = vload4(2, a_blk);
+        float4 a3 = vload4(3, a_blk);
+        float4 a4 = vload4(4, a_blk);
+        float4 a5 = vload4(5, a_blk);
+        float4 a6 = vload4(6, a_blk);
+        float4 a7 = vload4(7, a_blk);
 
-                uchar4 qb0 = vload4(i, qs0);
-                uchar4 qb1 = vload4(i, qs1);
-                uchar4 qb2 = vload4(i, qs2);
-                uchar4 qb3 = vload4(i, qs3);
+        float sum_a = (a0.x + a0.y + a0.z + a0.w) +
+                      (a1.x + a1.y + a1.z + a1.w) +
+                      (a2.x + a2.y + a2.z + a2.w) +
+                      (a3.x + a3.y + a3.z + a3.w) +
+                      (a4.x + a4.y + a4.z + a4.w) +
+                      (a5.x + a5.y + a5.z + a5.w) +
+                      (a6.x + a6.y + a6.z + a6.w) +
+                      (a7.x + a7.y + a7.z + a7.w);
 
-                float4 v_lo0 = convert_float4(qb0 & (uchar4)0x0F);
-                float4 v_hi0 = convert_float4(qb0 >> (uchar4)4);
-                block_acc0 += dot(a_lo, v_lo0) + dot(a_hi, v_hi0);
+        // Row 0
+        uchar4 q0_0 = qb0.s0123, q0_1 = qb0.s4567, q0_2 = qb0.s89ab, q0_3 = qb0.scdef;
+        float block_acc0 = dot(a0, convert_float4(q0_0 & (uchar4)0x0F)) + dot(a4, convert_float4(q0_0 >> (uchar4)4))
+                         + dot(a1, convert_float4(q0_1 & (uchar4)0x0F)) + dot(a5, convert_float4(q0_1 >> (uchar4)4))
+                         + dot(a2, convert_float4(q0_2 & (uchar4)0x0F)) + dot(a6, convert_float4(q0_2 >> (uchar4)4))
+                         + dot(a3, convert_float4(q0_3 & (uchar4)0x0F)) + dot(a7, convert_float4(q0_3 >> (uchar4)4));
 
-                float4 v_lo1 = convert_float4(qb1 & (uchar4)0x0F);
-                float4 v_hi1 = convert_float4(qb1 >> (uchar4)4);
-                block_acc1 += dot(a_lo, v_lo1) + dot(a_hi, v_hi1);
+        // Row 1
+        uchar4 q1_0 = qb1.s0123, q1_1 = qb1.s4567, q1_2 = qb1.s89ab, q1_3 = qb1.scdef;
+        float block_acc1 = dot(a0, convert_float4(q1_0 & (uchar4)0x0F)) + dot(a4, convert_float4(q1_0 >> (uchar4)4))
+                         + dot(a1, convert_float4(q1_1 & (uchar4)0x0F)) + dot(a5, convert_float4(q1_1 >> (uchar4)4))
+                         + dot(a2, convert_float4(q1_2 & (uchar4)0x0F)) + dot(a6, convert_float4(q1_2 >> (uchar4)4))
+                         + dot(a3, convert_float4(q1_3 & (uchar4)0x0F)) + dot(a7, convert_float4(q1_3 >> (uchar4)4));
 
-                float4 v_lo2 = convert_float4(qb2 & (uchar4)0x0F);
-                float4 v_hi2 = convert_float4(qb2 >> (uchar4)4);
-                block_acc2 += dot(a_lo, v_lo2) + dot(a_hi, v_hi2);
+        // Row 2
+        uchar4 q2_0 = qb2.s0123, q2_1 = qb2.s4567, q2_2 = qb2.s89ab, q2_3 = qb2.scdef;
+        float block_acc2 = dot(a0, convert_float4(q2_0 & (uchar4)0x0F)) + dot(a4, convert_float4(q2_0 >> (uchar4)4))
+                         + dot(a1, convert_float4(q2_1 & (uchar4)0x0F)) + dot(a5, convert_float4(q2_1 >> (uchar4)4))
+                         + dot(a2, convert_float4(q2_2 & (uchar4)0x0F)) + dot(a6, convert_float4(q2_2 >> (uchar4)4))
+                         + dot(a3, convert_float4(q2_3 & (uchar4)0x0F)) + dot(a7, convert_float4(q2_3 >> (uchar4)4));
 
-                float4 v_lo3 = convert_float4(qb3 & (uchar4)0x0F);
-                float4 v_hi3 = convert_float4(qb3 >> (uchar4)4);
-                block_acc3 += dot(a_lo, v_lo3) + dot(a_hi, v_hi3);
-            }
-        } else {
-            global const float *a_blk = a + blk * 32;
-            for (int i = 0; i < 4; i++) {
-                float4 a_lo = vload4(i, a_blk);
-                float4 a_hi = vload4(i + 4, a_blk);
-                sum_a += a_lo.x + a_lo.y + a_lo.z + a_lo.w +
-                         a_hi.x + a_hi.y + a_hi.z + a_hi.w;
-
-                uchar4 qb0 = vload4(i, qs0);
-                uchar4 qb1 = vload4(i, qs1);
-                uchar4 qb2 = vload4(i, qs2);
-                uchar4 qb3 = vload4(i, qs3);
-
-                float4 v_lo0 = convert_float4(qb0 & (uchar4)0x0F);
-                float4 v_hi0 = convert_float4(qb0 >> (uchar4)4);
-                block_acc0 += dot(a_lo, v_lo0) + dot(a_hi, v_hi0);
-
-                float4 v_lo1 = convert_float4(qb1 & (uchar4)0x0F);
-                float4 v_hi1 = convert_float4(qb1 >> (uchar4)4);
-                block_acc1 += dot(a_lo, v_lo1) + dot(a_hi, v_hi1);
-
-                float4 v_lo2 = convert_float4(qb2 & (uchar4)0x0F);
-                float4 v_hi2 = convert_float4(qb2 >> (uchar4)4);
-                block_acc2 += dot(a_lo, v_lo2) + dot(a_hi, v_hi2);
-
-                float4 v_lo3 = convert_float4(qb3 & (uchar4)0x0F);
-                float4 v_hi3 = convert_float4(qb3 >> (uchar4)4);
-                block_acc3 += dot(a_lo, v_lo3) + dot(a_hi, v_hi3);
-            }
-        }
+        // Row 3
+        uchar4 q3_0 = qb3.s0123, q3_1 = qb3.s4567, q3_2 = qb3.s89ab, q3_3 = qb3.scdef;
+        float block_acc3 = dot(a0, convert_float4(q3_0 & (uchar4)0x0F)) + dot(a4, convert_float4(q3_0 >> (uchar4)4))
+                         + dot(a1, convert_float4(q3_1 & (uchar4)0x0F)) + dot(a5, convert_float4(q3_1 >> (uchar4)4))
+                         + dot(a2, convert_float4(q3_2 & (uchar4)0x0F)) + dot(a6, convert_float4(q3_2 >> (uchar4)4))
+                         + dot(a3, convert_float4(q3_3 & (uchar4)0x0F)) + dot(a7, convert_float4(q3_3 >> (uchar4)4));
 
         float bias = 8.0f * sum_a;
         sum0 += (block_acc0 - bias) * d0;
@@ -484,9 +472,9 @@ kernel void gemv_q4_0_ffn_swiglu(
     global const uchar *b_up,       // [N = 6144, K = 2048]
     global float *dst,              // [N = 6144]
     int N,
-    int K
+    int K,
+    local float *l_a
 ) {
-    local float l_a[2048];
     local float l_gate[8][64];
     local float l_up[8][64];
 
@@ -494,12 +482,11 @@ kernel void gemv_q4_0_ffn_swiglu(
     int tid = get_local_id(0);
     int wg_size = get_local_size(0);
 
-    if (K <= 2048) {
-        for (int i = tid; i < K; i += wg_size) {
-            l_a[i] = a[i];
-        }
-        barrier(CLK_LOCAL_MEM_FENCE);
+    // Dynamically sized shared memory buffer
+    for (int i = tid; i < K; i += wg_size) {
+        l_a[i] = a[i];
     }
+    barrier(CLK_LOCAL_MEM_FENCE);
 
     int n_blocks = K / 32;
     global const uchar *gate_ptrs[8];
@@ -514,71 +501,60 @@ kernel void gemv_q4_0_ffn_swiglu(
     float sum_up[8]   = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 
     for (int blk = tid; blk < n_blocks; blk += wg_size) {
-        local const float *la_blk = l_a + blk * 32;
-        global const float *ga_blk = a + blk * 32;
+        local const float *a_blk = l_a + blk * 32;
 
         float d_gate[8], d_up[8];
-        global const uchar *qs_gate[8], *qs_up[8];
+        uchar16 qg[8], qu[8];
+
         for (int r = 0; r < 8; r++) {
             global const uchar *bg = gate_ptrs[r] + (size_t)blk * 18;
             d_gate[r] = fp16_to_fp32((ushort)bg[0] | ((ushort)bg[1] << 8));
-            qs_gate[r] = bg + 2;
+            qg[r] = vload16(0, bg + 2);
 
             global const uchar *bu = up_ptrs[r] + (size_t)blk * 18;
             d_up[r] = fp16_to_fp32((ushort)bu[0] | ((ushort)bu[1] << 8));
-            qs_up[r] = bu + 2;
+            qu[r] = vload16(0, bu + 2);
         }
 
-        float block_acc_gate[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-        float block_acc_up[8]   = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-        float sum_a = 0.0f;
+        float4 a0 = vload4(0, a_blk);
+        float4 a1 = vload4(1, a_blk);
+        float4 a2 = vload4(2, a_blk);
+        float4 a3 = vload4(3, a_blk);
+        float4 a4 = vload4(4, a_blk);
+        float4 a5 = vload4(5, a_blk);
+        float4 a6 = vload4(6, a_blk);
+        float4 a7 = vload4(7, a_blk);
 
-        if (K <= 2048) {
-            local const float *a_blk = l_a + blk * 32;
-            for (int i = 0; i < 4; i++) {
-                float4 a_lo = vload4(i, a_blk);
-                float4 a_hi = vload4(i + 4, a_blk);
-                sum_a += a_lo.x + a_lo.y + a_lo.z + a_lo.w +
-                         a_hi.x + a_hi.y + a_hi.z + a_hi.w;
-
-                for (int r = 0; r < 8; r++) {
-                    uchar4 qb_g = vload4(i, qs_gate[r]);
-                    float4 vg_lo = convert_float4(qb_g & (uchar4)0x0F);
-                    float4 vg_hi = convert_float4(qb_g >> (uchar4)4);
-                    block_acc_gate[r] += dot(a_lo, vg_lo) + dot(a_hi, vg_hi);
-
-                    uchar4 qb_u = vload4(i, qs_up[r]);
-                    float4 vu_lo = convert_float4(qb_u & (uchar4)0x0F);
-                    float4 vu_hi = convert_float4(qb_u >> (uchar4)4);
-                    block_acc_up[r] += dot(a_lo, vu_lo) + dot(a_hi, vu_hi);
-                }
-            }
-        } else {
-            global const float *a_blk = a + blk * 32;
-            for (int i = 0; i < 4; i++) {
-                float4 a_lo = vload4(i, a_blk);
-                float4 a_hi = vload4(i + 4, a_blk);
-                sum_a += a_lo.x + a_lo.y + a_lo.z + a_lo.w +
-                         a_hi.x + a_hi.y + a_hi.z + a_hi.w;
-
-                for (int r = 0; r < 8; r++) {
-                    uchar4 qb_g = vload4(i, qs_gate[r]);
-                    float4 vg_lo = convert_float4(qb_g & (uchar4)0x0F);
-                    float4 vg_hi = convert_float4(qb_g >> (uchar4)4);
-                    block_acc_gate[r] += dot(a_lo, vg_lo) + dot(a_hi, vg_hi);
-
-                    uchar4 qb_u = vload4(i, qs_up[r]);
-                    float4 vu_lo = convert_float4(qb_u & (uchar4)0x0F);
-                    float4 vu_hi = convert_float4(qb_u >> (uchar4)4);
-                    block_acc_up[r] += dot(a_lo, vu_lo) + dot(a_hi, vu_hi);
-                }
-            }
-        }
+        float sum_a = (a0.x + a0.y + a0.z + a0.w) +
+                      (a1.x + a1.y + a1.z + a1.w) +
+                      (a2.x + a2.y + a2.z + a2.w) +
+                      (a3.x + a3.y + a3.z + a3.w) +
+                      (a4.x + a4.y + a4.z + a4.w) +
+                      (a5.x + a5.y + a5.z + a5.w) +
+                      (a6.x + a6.y + a6.z + a6.w) +
+                      (a7.x + a7.y + a7.z + a7.w);
 
         float bias = 8.0f * sum_a;
+
         for (int r = 0; r < 8; r++) {
-            sum_gate[r] += (block_acc_gate[r] - bias) * d_gate[r];
-            sum_up[r]   += (block_acc_up[r]   - bias) * d_up[r];
+            uchar16 g16 = qg[r];
+            uchar16 u16 = qu[r];
+
+            uchar4 g0 = g16.s0123, g1 = g16.s4567, g2 = g16.s89ab, g3 = g16.scdef;
+            uchar4 u0 = u16.s0123, u1 = u16.s4567, u2 = u16.s89ab, u3 = u16.scdef;
+
+            float acc_g = dot(a0, convert_float4(g0 & (uchar4)0x0F)) + dot(a4, convert_float4(g0 >> (uchar4)4))
+                        + dot(a1, convert_float4(g1 & (uchar4)0x0F)) + dot(a5, convert_float4(g1 >> (uchar4)4))
+                        + dot(a2, convert_float4(g2 & (uchar4)0x0F)) + dot(a6, convert_float4(g2 >> (uchar4)4))
+                        + dot(a3, convert_float4(g3 & (uchar4)0x0F)) + dot(a7, convert_float4(g3 >> (uchar4)4));
+
+            float acc_u = dot(a0, convert_float4(u0 & (uchar4)0x0F)) + dot(a4, convert_float4(u0 >> (uchar4)4))
+                        + dot(a1, convert_float4(u1 & (uchar4)0x0F)) + dot(a5, convert_float4(u1 >> (uchar4)4))
+                        + dot(a2, convert_float4(u2 & (uchar4)0x0F)) + dot(a6, convert_float4(u2 >> (uchar4)4))
+                        + dot(a3, convert_float4(u3 & (uchar4)0x0F)) + dot(a7, convert_float4(u3 >> (uchar4)4));
+
+            sum_gate[r] += (acc_g - bias) * d_gate[r];
+            sum_up[r]   += (acc_u - bias) * d_up[r];
         }
     }
 
