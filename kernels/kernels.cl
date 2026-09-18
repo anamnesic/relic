@@ -303,7 +303,7 @@ kernel void gemv_q8_0(
 
 //------------------------------------------------------------------------------
 //------------------------------------------------------------------------------
-// MULTI-ROW 8x GEMV Q4_0: 2-Warp Tiled Execution with Dynamic Local Activation Cache
+// MULTI-ROW 16x GEMV Q4_0: 4-Warp Tiled Execution with Dynamic Local Activation Cache
 //------------------------------------------------------------------------------
 kernel void gemv_q4_0(
     global const float *a,
@@ -313,17 +313,17 @@ kernel void gemv_q4_0(
     int K,
     local float *l_a
 ) {
-    local float l_sum0[2][32];
-    local float l_sum1[2][32];
-    local float l_sum2[2][32];
-    local float l_sum3[2][32];
+    local float l_sum0[4][32];
+    local float l_sum1[4][32];
+    local float l_sum2[4][32];
+    local float l_sum3[4][32];
 
     int tid = get_local_id(0);
     int wg_size = get_local_size(0);
     int warp_id = tid / 32;
     int lane = tid % 32;
 
-    int base_row = get_group_id(0) * 8 + warp_id * 4;
+    int base_row = get_group_id(0) * 16 + warp_id * 4;
     int row0 = base_row;
     int row1 = base_row + 1;
     int row2 = base_row + 2;
@@ -336,10 +336,10 @@ kernel void gemv_q4_0(
     barrier(CLK_LOCAL_MEM_FENCE);
 
     int n_blocks = K / 32;
-    global const uchar *row_ptr0 = b + (size_t)row0 * (size_t)(n_blocks * 18);
-    global const uchar *row_ptr1 = (row1 < N) ? (b + (size_t)row1 * (size_t)(n_blocks * 18)) : row_ptr0;
-    global const uchar *row_ptr2 = (row2 < N) ? (b + (size_t)row2 * (size_t)(n_blocks * 18)) : row_ptr0;
-    global const uchar *row_ptr3 = (row3 < N) ? (b + (size_t)row3 * (size_t)(n_blocks * 18)) : row_ptr0;
+    global const uchar *row_ptr0 = (row0 < N) ? (b + (size_t)row0 * (size_t)(n_blocks * 18)) : b;
+    global const uchar *row_ptr1 = (row1 < N) ? (b + (size_t)row1 * (size_t)(n_blocks * 18)) : b;
+    global const uchar *row_ptr2 = (row2 < N) ? (b + (size_t)row2 * (size_t)(n_blocks * 18)) : b;
+    global const uchar *row_ptr3 = (row3 < N) ? (b + (size_t)row3 * (size_t)(n_blocks * 18)) : b;
 
     float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
 

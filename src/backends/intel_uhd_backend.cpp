@@ -290,7 +290,7 @@ void IntelUhdBackend::gemv_q4_0(BackendBuffer &dst, BackendBuffer &a, BackendBuf
     clSetKernelArg(k, 4, sizeof(cl_int), &kk);
     clSetKernelArg(k, 5, (size_t)kk * sizeof(float), nullptr);
 
-    size_t local = 32;
+    size_t local = 128;
     size_t n_groups = ((size_t)N + 15) / 16;
     size_t global = n_groups * local;
     clEnqueueNDRangeKernel(queue_, k, 1, nullptr, &global, &local, 0, nullptr, nullptr);
