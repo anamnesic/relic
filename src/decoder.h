@@ -23,7 +23,8 @@ public:
     virtual void reset() = 0;
 
     // Executes a forward pass for a single token at the specified sequence position.
-    virtual int forward(const LlamaModel &model, int token_id, int64_t position, float *logits) = 0;
+    // If compute_output is false, the final vocabulary projection (output.weight) is skipped for speed.
+    virtual int forward(const LlamaModel &model, int token_id, int64_t position, float *logits, bool compute_output = true) = 0;
 
     // Executes a batched forward pass for multiple tokens starting at start_position.
     // logits_out must have space for token_ids.size() * model.n_vocab floats.
@@ -42,6 +43,9 @@ public:
 
     // Optional pre-computation / GPU VRAM weight upload ahead of generation timing.
     virtual void warm_up(const LlamaModel &model) {}
+
+    // Sample next token directly on GPU or CPU without full vocab readback
+    virtual int sample_token(float temperature = 0.0f, int top_k = 40, float top_p = 0.9f) { return 0; }
 
     // State checkpointing and rollback for non-destructive speculative decoding
     virtual void save_state_checkpoint() {}

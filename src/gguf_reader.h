@@ -8,6 +8,20 @@
 #include <cassert>
 #include <limits>
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+#define relic_fseeko _fseeki64
+#define relic_ftello _ftelli64
+using relic_off64_t = __int64;
+#elif defined(__APPLE__) && defined(__MACH__)
+#define relic_fseeko fseeko
+#define relic_ftello ftello
+using relic_off64_t = off_t;
+#else
+#define relic_fseeko fseeko64
+#define relic_ftello ftello64
+using relic_off64_t = off64_t;
+#endif
+
 constexpr uint32_t GGUF_MAGIC = 0x46554747;
 constexpr uint32_t GGUF_VERSION = 3;
 constexpr uint32_t GGUF_DEFAULT_ALIGNMENT = 32;
@@ -158,14 +172,14 @@ struct GgufReader {
     bool load(const char *filename) {
         FILE *f = fopen(filename, "rb");
         if (!f) return false;
-        if (_fseeki64(f, 0, SEEK_END) != 0) { fclose(f); return false; }
-        __int64 file_size = _ftelli64(f);
+        if (relic_fseeko(f, 0, SEEK_END) != 0) { fclose(f); return false; }
+        relic_off64_t file_size = relic_ftello(f);
         if (file_size <= 0 || static_cast<uint64_t>(file_size) > std::numeric_limits<size_t>::max()) {
             fclose(f);
             return false;
         }
         size_t size = static_cast<size_t>(file_size);
-        if (_fseeki64(f, 0, SEEK_SET) != 0) { fclose(f); return false; }
+        if (relic_fseeko(f, 0, SEEK_SET) != 0) { fclose(f); return false; }
         data.resize(size);
         if (fread(data.data(), 1, size, f) != size) {
             fclose(f);
@@ -230,6 +244,7 @@ struct GgufReader {
                     GgufType arr_type = (GgufType)read_i32();
                     uint64_t arr_n = read_u64();
                     if (!valid || arr_n > data.size() - pos) return false;
+                    metadata_int[key + ".count"] = (int64_t)arr_n;
                     for (uint64_t j = 0; j < arr_n; j++) {
                         if (arr_type == GgufType::STRING) {
                             metadata_str[key + "_" + std::to_string(j)] = read_string();

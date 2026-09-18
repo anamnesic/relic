@@ -46,11 +46,11 @@ void InferenceEngine::free_buffers()
     n_past = 0;
 }
 
-int InferenceEngine::forward(int token_id, float *logits)
+int InferenceEngine::forward(int token_id, float *logits, bool compute_output)
 {
     if (!decoder || !model)
         return -1;
-    int res = decoder->forward(*model, token_id, n_past, logits);
+    int res = decoder->forward(*model, token_id, n_past, logits, compute_output);
     if (res == 0)
     {
         n_past++;
@@ -116,8 +116,9 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
 
     for (size_t i = 0; i < input_tokens.size(); i++)
     {
-        float *l_ptr = (i + 1 == input_tokens.size()) ? logits.data() : nullptr;
-        if (forward(input_tokens[i], l_ptr) != 0)
+        bool is_last = (i + 1 == input_tokens.size());
+        float *l_ptr = (is_last && (!cl || !cl->initialized)) ? logits.data() : nullptr;
+        if (forward(input_tokens[i], l_ptr, is_last) != 0)
         {
             fprintf(stderr, "Forward pass failed during prompt processing\n");
             fflush(stderr);
@@ -148,7 +149,14 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
 
     while (generated_count < max_tokens)
     {
-        last_token = Sampler::sample(logits.data(), (size_t)model->n_vocab, temperature, top_k, 0.9f);
+        if (cl && cl->initialized)
+        {
+            last_token = decoder->sample_token(temperature, top_k, 0.9f);
+        }
+        else
+        {
+            last_token = Sampler::sample(logits.data(), (size_t)model->n_vocab, temperature, top_k, 0.9f);
+        }
 
         if (last_token == tokenizer->eos_id)
             break;
@@ -159,7 +167,8 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
         all_tokens.push_back(last_token);
         generated_count++;
 
-        if (forward(last_token, logits.data()) != 0)
+        float *l_ptr = (cl && cl->initialized) ? nullptr : logits.data();
+        if (forward(last_token, l_ptr, true) != 0)
         {
             fprintf(stderr, "\nForward pass failed during token generation\n");
             break;

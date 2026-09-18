@@ -6,11 +6,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(OpenCL REQUIRED)
 
+if(UNIX AND NOT APPLE)
+    set(CMAKE_BUILD_RPATH "/usr/local/lib")
+    add_link_options("-Wl,-rpath,/usr/local/lib,--disable-new-dtags")
+endif()
+
 add_executable(relic
     src/main.cpp
     src/architecture.cpp
     src/qwen35_state.cpp
     src/decoder.cpp
+    src/adapters/llama_decoder_adapter.cpp
+    src/adapters/qwen35_decoder_adapter.cpp
     src/model.cpp
     src/opencl_backend.cpp
     src/tokenizer.cpp
@@ -26,6 +33,7 @@ add_executable(relic
     src/backends/kernel_registry.cpp
     src/benchmark_suite.cpp
     src/numerical_verifier.cpp
+    src/server.cpp
 )
 
 add_executable(relic_test
@@ -34,6 +42,8 @@ add_executable(relic_test
     src/opencl_backend.cpp
     src/qwen35_state.cpp
     src/decoder.cpp
+    src/adapters/llama_decoder_adapter.cpp
+    src/adapters/qwen35_decoder_adapter.cpp
     src/model.cpp
     src/planner/hardware_profile.cpp
     src/planner/adaptive_planner.cpp

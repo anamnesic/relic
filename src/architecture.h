@@ -21,6 +21,7 @@ struct ArchitectureSpec {
     int64_t n_ff = 0;
     float norm_eps = 1e-5f;
     float rope_freq_base = 10000.0f;
+    int64_t rope_dimension_count = 0;
 
     // Qwen3.5's three recurrent Gated DeltaNet layers per full-attention layer.
     int64_t full_attention_interval = 0;

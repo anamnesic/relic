@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <memory>
 #include <algorithm>
+#include <thread>
 #include "model.h"
 
 // Macro for OpenCL error checking
@@ -46,6 +47,7 @@ struct ClDevice {
     int alignment = 128;
     int opencl_c_major = 1;
     int opencl_c_minor = 2;
+    cl_program program = nullptr;
 };
 
 struct ClMemoryTracker {
@@ -178,6 +180,7 @@ public:
     ClDevice dev;
     bool initialized = false;
 
+    static void list_devices();
     bool init(int platform_idx = -1, int device_idx = 0);
     void shutdown();
 
@@ -192,13 +195,21 @@ public:
     void add_rms_norm(ClBuffer &residual, ClBuffer &branch, ClBuffer &weight, ClBuffer &norm_out, int64_t n, float eps = 1e-6f);
     void qwen_conv1d(ClBuffer &conv_state, ClBuffer &conv_in, ClBuffer &weight, ClBuffer &conv_out, int64_t C);
     void qwen_deltanet(ClBuffer &ssm_state, ClBuffer &conv_out, ClBuffer &alpha, ClBuffer &beta, ClBuffer &delta_out, int64_t key_dim, int64_t qk_dim, int64_t linear_inner);
-    void qwen_attention_step(ClBuffer &q_buf, ClBuffer &k_buf, ClBuffer &v_buf, ClBuffer &k_cache, ClBuffer &v_cache, ClBuffer &attn_out, int64_t n_head, int64_t n_kv_head, int64_t head_dim, int64_t n_embd, int64_t pos, int64_t max_seq);
+    void qwen_deltanet_fused(ClBuffer &ssm_state, ClBuffer &conv_out, ClBuffer &alpha, ClBuffer &beta,
+                             ClBuffer *ssm_a, ClBuffer *ssm_dt,
+                             ClBuffer *ssm_norm_w, ClBuffer *attn_gate, ClBuffer &delta_out,
+                             int64_t key_dim, int64_t qk_dim, int64_t linear_inner, float norm_eps = 1e-6f);
+    void qwen_deinterleave_q_gate(ClBuffer &q_full, ClBuffer &q, ClBuffer &gate, int64_t num_heads, int64_t head_dim);
+    void qwen_qk_norm(ClBuffer &dst, ClBuffer &src, ClBuffer &norm_w, int64_t num_heads, int64_t head_dim, float eps = 1e-6f);
+    void qwen_attn_gate_mul(ClBuffer &attn_out, ClBuffer &gate, int64_t n);
+    void qwen_attention_step(ClBuffer &q_buf, ClBuffer &k_cache, ClBuffer &v_cache, ClBuffer &attn_out, int64_t n_head, int64_t n_kv_head, int64_t head_dim, int64_t pos, int64_t max_seq);
+    int sample_logits(ClBuffer &logits, int64_t n_vocab, float temperature = 0.0f, int top_k = 40, float top_p = 0.9f);
 
     // Core operations
     void rms_norm(ClBuffer &out, ClBuffer &x, ClBuffer &weight, int64_t n, int64_t rows);
     void matmul_f32(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t M, int64_t N, int64_t K);
     void matmul_f32_nt(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t M, int64_t N, int64_t K);
-    void rope(ClBuffer &x, int64_t n_embd, int64_t n_head, int64_t pos, int64_t n_tokens);
+    void rope(ClBuffer &x, int64_t n_embd, int64_t n_head, int64_t pos, int64_t n_tokens, float freq_base = 10000.0f, int64_t rope_dim = 0);
     void softmax(ClBuffer &x, int64_t n, int64_t rows);
     void silu(ClBuffer &out, ClBuffer &x, int64_t n);
     void add(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t n);
@@ -227,40 +238,61 @@ struct GpuTensorStore {
             const uint8_t *src_q8 = (const uint8_t *)host_data;
             uint8_t *dst_q4 = q4_data.data();
 
-            for (int64_t b = 0; b < n_blocks; b++) {
-                const uint8_t *b_q8 = src_q8 + b * 34;
-                uint8_t *b_q4 = dst_q4 + b * 18;
+            int n_threads = std::min((int)std::thread::hardware_concurrency(), 8);
+            if (n_threads <= 0) n_threads = 1;
+            if (n_blocks < 2048) n_threads = 1;
 
-                uint16_t d8_bits = (uint16_t)b_q8[0] | ((uint16_t)b_q8[1] << 8);
-                float d8 = half_bits_to_float(d8_bits);
-                const int8_t *qs8 = (const int8_t *)(b_q8 + 2);
+            auto worker_func = [=](int64_t b_start, int64_t b_end) {
+                for (int64_t b = b_start; b < b_end; b++) {
+                    const uint8_t *b_q8 = src_q8 + b * 34;
+                    uint8_t *b_q4 = dst_q4 + b * 18;
 
-                float w[32];
-                float amax = 0.0f;
-                for (int i = 0; i < 32; i++) {
-                    float val = (float)qs8[i] * d8;
-                    w[i] = val;
-                    float abs_val = fabsf(val);
-                    if (abs_val > amax) amax = abs_val;
+                    uint16_t d8_bits = (uint16_t)b_q8[0] | ((uint16_t)b_q8[1] << 8);
+                    float d8 = half_bits_to_float(d8_bits);
+                    const int8_t *qs8 = (const int8_t *)(b_q8 + 2);
+
+                    float w[32];
+                    float amax = 0.0f;
+                    for (int i = 0; i < 32; i++) {
+                        float val = (float)qs8[i] * d8;
+                        w[i] = val;
+                        float abs_val = fabsf(val);
+                        if (abs_val > amax) amax = abs_val;
+                    }
+
+                    float d4 = amax / 7.0f;
+                    float id = (d4 > 0.0f) ? (1.0f / d4) : 0.0f;
+
+                    uint16_t d4_bits = float_to_half_bits(d4);
+                    b_q4[0] = (uint8_t)(d4_bits & 0xFF);
+                    b_q4[1] = (uint8_t)(d4_bits >> 8);
+
+                    for (int i = 0; i < 16; i++) {
+                        int v0 = (int)roundf(w[i] * id);
+                        v0 = std::min(7, std::max(-8, v0));
+                        uint8_t q0 = (uint8_t)(v0 + 8);
+
+                        int v1 = (int)roundf(w[i + 16] * id);
+                        v1 = std::min(7, std::max(-8, v1));
+                        uint8_t q1 = (uint8_t)(v1 + 8);
+
+                        b_q4[2 + i] = (uint8_t)(q0 | (q1 << 4));
+                    }
                 }
+            };
 
-                float d4 = amax / 7.0f;
-                float id = (d4 > 0.0f) ? (1.0f / d4) : 0.0f;
-
-                uint16_t d4_bits = float_to_half_bits(d4);
-                b_q4[0] = (uint8_t)(d4_bits & 0xFF);
-                b_q4[1] = (uint8_t)(d4_bits >> 8);
-
-                for (int i = 0; i < 16; i++) {
-                    int v0 = (int)roundf(w[i] * id);
-                    v0 = std::min(7, std::max(-8, v0));
-                    uint8_t q0 = (uint8_t)(v0 + 8);
-
-                    int v1 = (int)roundf(w[i + 16] * id);
-                    v1 = std::min(7, std::max(-8, v1));
-                    uint8_t q1 = (uint8_t)(v1 + 8);
-
-                    b_q4[2 + i] = (uint8_t)(q0 | (q1 << 4));
+            if (n_threads == 1) {
+                worker_func(0, n_blocks);
+            } else {
+                std::vector<std::thread> workers;
+                workers.reserve(n_threads);
+                for (int t = 0; t < n_threads; t++) {
+                    int64_t b_start = t * n_blocks / n_threads;
+                    int64_t b_end = (t == n_threads - 1) ? n_blocks : (t + 1) * n_blocks / n_threads;
+                    workers.emplace_back(worker_func, b_start, b_end);
+                }
+                for (auto &w : workers) {
+                    w.join();
                 }
             }
 

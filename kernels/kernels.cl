@@ -302,7 +302,8 @@ kernel void gemv_q8_0(
 }
 
 //------------------------------------------------------------------------------
-// MULTI-ROW 16x GEMV Q4_0: Computes 16 rows per warp with 16x Activation Reuse!
+//------------------------------------------------------------------------------
+// MULTI-ROW 8x GEMV Q4_0: 2-Warp Tiled Execution with Local Activation Cache
 //------------------------------------------------------------------------------
 kernel void gemv_q4_0(
     global const float *a,
@@ -311,74 +312,160 @@ kernel void gemv_q4_0(
     int N,
     int K
 ) {
-    local float l_sum[16][32];
+    local float l_a[6144];
+    local float l_sum0[2][32];
+    local float l_sum1[2][32];
+    local float l_sum2[2][32];
+    local float l_sum3[2][32];
 
-    int base_row = get_group_id(0) * 16;
     int tid = get_local_id(0);
     int wg_size = get_local_size(0);
+    int warp_id = tid / 32;
+    int lane = tid % 32;
+
+    int base_row = get_group_id(0) * 8 + warp_id * 4;
+    int row0 = base_row;
+    int row1 = base_row + 1;
+    int row2 = base_row + 2;
+    int row3 = base_row + 3;
+
+    // Cache vector 'a' into on-chip shared memory when K <= 6144
+    if (K <= 6144) {
+        for (int i = tid; i < K; i += wg_size) {
+            l_a[i] = a[i];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
 
     int n_blocks = K / 32;
-    global const uchar *row_ptrs[16];
-    for (int r = 0; r < 16; r++) {
-        int row = base_row + r;
-        row_ptrs[r] = (row < N) ? (b + (size_t)row * (size_t)(n_blocks * 18)) : b;
-    }
+    global const uchar *row_ptr0 = b + (size_t)row0 * (size_t)(n_blocks * 18);
+    global const uchar *row_ptr1 = (row1 < N) ? (b + (size_t)row1 * (size_t)(n_blocks * 18)) : row_ptr0;
+    global const uchar *row_ptr2 = (row2 < N) ? (b + (size_t)row2 * (size_t)(n_blocks * 18)) : row_ptr0;
+    global const uchar *row_ptr3 = (row3 < N) ? (b + (size_t)row3 * (size_t)(n_blocks * 18)) : row_ptr0;
 
-    float sums[16] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
-                      0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
 
-    for (int blk = tid; blk < n_blocks; blk += wg_size) {
-        global const float *a_blk = a + blk * 32;
+    for (int blk = lane; blk < n_blocks; blk += 32) {
+        global const uchar *b_blk0 = row_ptr0 + (size_t)blk * 18;
+        float d0 = fp16_to_fp32((ushort)b_blk0[0] | ((ushort)b_blk0[1] << 8));
+        global const uchar *qs0 = b_blk0 + 2;
 
-        float d[16];
-        global const uchar *qs[16];
-        for (int r = 0; r < 16; r++) {
-            global const uchar *b_blk = row_ptrs[r] + (size_t)blk * 18;
-            d[r] = fp16_to_fp32((ushort)b_blk[0] | ((ushort)b_blk[1] << 8));
-            qs[r] = b_blk + 2;
-        }
+        global const uchar *b_blk1 = row_ptr1 + (size_t)blk * 18;
+        float d1 = fp16_to_fp32((ushort)b_blk1[0] | ((ushort)b_blk1[1] << 8));
+        global const uchar *qs1 = b_blk1 + 2;
 
-        for (int i = 0; i < 4; i++) {
-            float4 a_lo = vload4(i, a_blk);
-            float4 a_hi = vload4(i + 4, a_blk);
+        global const uchar *b_blk2 = row_ptr2 + (size_t)blk * 18;
+        float d2 = fp16_to_fp32((ushort)b_blk2[0] | ((ushort)b_blk2[1] << 8));
+        global const uchar *qs2 = b_blk2 + 2;
 
-            for (int r = 0; r < 16; r++) {
-                uchar4 qb = vload4(i, qs[r]);
-                float4 v_lo = (convert_float4(qb & (uchar4)0x0F) - (float4)8.0f) * d[r];
-                float4 v_hi = (convert_float4(qb >> (uchar4)4)   - (float4)8.0f) * d[r];
-                sums[r] += dot(a_lo, v_lo) + dot(a_hi, v_hi);
+        global const uchar *b_blk3 = row_ptr3 + (size_t)blk * 18;
+        float d3 = fp16_to_fp32((ushort)b_blk3[0] | ((ushort)b_blk3[1] << 8));
+        global const uchar *qs3 = b_blk3 + 2;
+
+        float block_acc0 = 0.0f, block_acc1 = 0.0f, block_acc2 = 0.0f, block_acc3 = 0.0f;
+
+        if (K <= 6144) {
+            local const float *a_blk = l_a + blk * 32;
+            for (int i = 0; i < 4; i++) {
+                float4 a_lo = vload4(i, a_blk);
+                float4 a_hi = vload4(i + 4, a_blk);
+
+                uchar4 qb0 = vload4(i, qs0);
+                uchar4 qb1 = vload4(i, qs1);
+                uchar4 qb2 = vload4(i, qs2);
+                uchar4 qb3 = vload4(i, qs3);
+
+                float4 v_lo0 = convert_float4(qb0 & (uchar4)0x0F) - (float4)8.0f;
+                float4 v_hi0 = convert_float4(qb0 >> (uchar4)4)   - (float4)8.0f;
+                block_acc0 += dot(a_lo, v_lo0) + dot(a_hi, v_hi0);
+
+                float4 v_lo1 = convert_float4(qb1 & (uchar4)0x0F) - (float4)8.0f;
+                float4 v_hi1 = convert_float4(qb1 >> (uchar4)4)   - (float4)8.0f;
+                block_acc1 += dot(a_lo, v_lo1) + dot(a_hi, v_hi1);
+
+                float4 v_lo2 = convert_float4(qb2 & (uchar4)0x0F) - (float4)8.0f;
+                float4 v_hi2 = convert_float4(qb2 >> (uchar4)4)   - (float4)8.0f;
+                block_acc2 += dot(a_lo, v_lo2) + dot(a_hi, v_hi2);
+
+                float4 v_lo3 = convert_float4(qb3 & (uchar4)0x0F) - (float4)8.0f;
+                float4 v_hi3 = convert_float4(qb3 >> (uchar4)4)   - (float4)8.0f;
+                block_acc3 += dot(a_lo, v_lo3) + dot(a_hi, v_hi3);
+            }
+        } else {
+            global const float *a_blk = a + blk * 32;
+            for (int i = 0; i < 4; i++) {
+                float4 a_lo = vload4(i, a_blk);
+                float4 a_hi = vload4(i + 4, a_blk);
+
+                uchar4 qb0 = vload4(i, qs0);
+                uchar4 qb1 = vload4(i, qs1);
+                uchar4 qb2 = vload4(i, qs2);
+                uchar4 qb3 = vload4(i, qs3);
+
+                float4 v_lo0 = convert_float4(qb0 & (uchar4)0x0F) - (float4)8.0f;
+                float4 v_hi0 = convert_float4(qb0 >> (uchar4)4)   - (float4)8.0f;
+                block_acc0 += dot(a_lo, v_lo0) + dot(a_hi, v_hi0);
+
+                float4 v_lo1 = convert_float4(qb1 & (uchar4)0x0F) - (float4)8.0f;
+                float4 v_hi1 = convert_float4(qb1 >> (uchar4)4)   - (float4)8.0f;
+                block_acc1 += dot(a_lo, v_lo1) + dot(a_hi, v_hi1);
+
+                float4 v_lo2 = convert_float4(qb2 & (uchar4)0x0F) - (float4)8.0f;
+                float4 v_hi2 = convert_float4(qb2 >> (uchar4)4)   - (float4)8.0f;
+                block_acc2 += dot(a_lo, v_lo2) + dot(a_hi, v_hi2);
+
+                float4 v_lo3 = convert_float4(qb3 & (uchar4)0x0F) - (float4)8.0f;
+                float4 v_hi3 = convert_float4(qb3 >> (uchar4)4)   - (float4)8.0f;
+                block_acc3 += dot(a_lo, v_lo3) + dot(a_hi, v_hi3);
             }
         }
+
+        sum0 += block_acc0 * d0;
+        sum1 += block_acc1 * d1;
+        sum2 += block_acc2 * d2;
+        sum3 += block_acc3 * d3;
     }
 
-    for (int r = 0; r < 16; r++) {
-        l_sum[r][tid] = sums[r];
+    l_sum0[warp_id][lane] = sum0;
+    l_sum1[warp_id][lane] = sum1;
+    l_sum2[warp_id][lane] = sum2;
+    l_sum3[warp_id][lane] = sum3;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    if (lane < 16) {
+        l_sum0[warp_id][lane] += l_sum0[warp_id][lane + 16];
+        l_sum1[warp_id][lane] += l_sum1[warp_id][lane + 16];
+        l_sum2[warp_id][lane] += l_sum2[warp_id][lane + 16];
+        l_sum3[warp_id][lane] += l_sum3[warp_id][lane + 16];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (lane < 8) {
+        l_sum0[warp_id][lane] += l_sum0[warp_id][lane + 8];
+        l_sum1[warp_id][lane] += l_sum1[warp_id][lane + 8];
+        l_sum2[warp_id][lane] += l_sum2[warp_id][lane + 8];
+        l_sum3[warp_id][lane] += l_sum3[warp_id][lane + 8];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (lane < 4) {
+        l_sum0[warp_id][lane] += l_sum0[warp_id][lane + 4];
+        l_sum1[warp_id][lane] += l_sum1[warp_id][lane + 4];
+        l_sum2[warp_id][lane] += l_sum2[warp_id][lane + 4];
+        l_sum3[warp_id][lane] += l_sum3[warp_id][lane + 4];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (lane < 2) {
+        l_sum0[warp_id][lane] += l_sum0[warp_id][lane + 2];
+        l_sum1[warp_id][lane] += l_sum1[warp_id][lane + 2];
+        l_sum2[warp_id][lane] += l_sum2[warp_id][lane + 2];
+        l_sum3[warp_id][lane] += l_sum3[warp_id][lane + 2];
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
-    if (tid < 16) {
-        for (int r = 0; r < 16; r++) l_sum[r][tid] += l_sum[r][tid + 16];
-    }
-    barrier(CLK_LOCAL_MEM_FENCE);
-    if (tid < 8) {
-        for (int r = 0; r < 16; r++) l_sum[r][tid] += l_sum[r][tid + 8];
-    }
-    barrier(CLK_LOCAL_MEM_FENCE);
-    if (tid < 4) {
-        for (int r = 0; r < 16; r++) l_sum[r][tid] += l_sum[r][tid + 4];
-    }
-    barrier(CLK_LOCAL_MEM_FENCE);
-    if (tid < 2) {
-        for (int r = 0; r < 16; r++) l_sum[r][tid] += l_sum[r][tid + 2];
-    }
-    barrier(CLK_LOCAL_MEM_FENCE);
-
-    if (tid == 0) {
-        for (int r = 0; r < 16; r++) {
-            if (base_row + r < N) {
-                dst[base_row + r] = l_sum[r][0] + l_sum[r][1];
-            }
-        }
+    if (lane == 0) {
+        if (row0 < N) dst[row0] = l_sum0[warp_id][0] + l_sum0[warp_id][1];
+        if (row1 < N) dst[row1] = l_sum1[warp_id][0] + l_sum1[warp_id][1];
+        if (row2 < N) dst[row2] = l_sum2[warp_id][0] + l_sum2[warp_id][1];
+        if (row3 < N) dst[row3] = l_sum3[warp_id][0] + l_sum3[warp_id][1];
     }
 }
 
@@ -393,12 +480,20 @@ kernel void gemv_q4_0_ffn_swiglu(
     int N,
     int K
 ) {
-    local float l_gate[8][32];
-    local float l_up[8][32];
+    local float l_a[2048];
+    local float l_gate[8][64];
+    local float l_up[8][64];
 
     int base_row = get_group_id(0) * 8;
     int tid = get_local_id(0);
     int wg_size = get_local_size(0);
+
+    if (K <= 2048) {
+        for (int i = tid; i < K; i += wg_size) {
+            l_a[i] = a[i];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
 
     int n_blocks = K / 32;
     global const uchar *gate_ptrs[8];
@@ -413,7 +508,8 @@ kernel void gemv_q4_0_ffn_swiglu(
     float sum_up[8]   = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 
     for (int blk = tid; blk < n_blocks; blk += wg_size) {
-        global const float *a_blk = a + blk * 32;
+        local const float *la_blk = l_a + blk * 32;
+        global const float *ga_blk = a + blk * 32;
 
         float d_gate[8], d_up[8];
         global const uchar *qs_gate[8], *qs_up[8];
@@ -428,8 +524,8 @@ kernel void gemv_q4_0_ffn_swiglu(
         }
 
         for (int i = 0; i < 4; i++) {
-            float4 a_lo = vload4(i, a_blk);
-            float4 a_hi = vload4(i + 4, a_blk);
+            float4 a_lo = (K <= 2048) ? vload4(i, la_blk) : vload4(i, ga_blk);
+            float4 a_hi = (K <= 2048) ? vload4(i + 4, la_blk) : vload4(i + 4, ga_blk);
 
             for (int r = 0; r < 8; r++) {
                 uchar4 qb_g = vload4(i, qs_gate[r]);
@@ -451,6 +547,13 @@ kernel void gemv_q4_0_ffn_swiglu(
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
+    if (tid < 32) {
+        for (int r = 0; r < 8; r++) {
+            l_gate[r][tid] += l_gate[r][tid + 32];
+            l_up[r][tid]   += l_up[r][tid + 32];
+        }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
     if (tid < 16) {
         for (int r = 0; r < 8; r++) {
             l_gate[r][tid] += l_gate[r][tid + 16];
@@ -617,10 +720,11 @@ kernel void qwen_conv1d_silu(
     float s2 = conv_state[2 * C + c];
     float x  = conv_in[c];
 
-    float w0 = weight[0 * C + c];
-    float w1 = weight[1 * C + c];
-    float w2 = weight[2 * C + c];
-    float w3 = weight[3 * C + c];
+    // GGML GGUF layout: contiguous 4 weights per channel
+    float w0 = weight[c * 4 + 0];
+    float w1 = weight[c * 4 + 1];
+    float w2 = weight[c * 4 + 2];
+    float w3 = weight[c * 4 + 3];
 
     float val = s0 * w0 + s1 * w1 + s2 * w2 + x * w3;
     float act = val / (1.0f + exp(-val));
@@ -635,20 +739,18 @@ kernel void qwen_conv1d_silu(
 //------------------------------------------------------------------------------
 // GPU Recurrent Gated DeltaNet Step (In-Place GPU State S)
 // Dispatched with: Global = 16 * 128, Local = 128 (1 workgroup per head)
+// Row-parallel execution: each thread i computes row i of head h independently!
 //------------------------------------------------------------------------------
 kernel void qwen_gated_deltanet_step(
     global float *ssm_state,       // [16, 128, 128]
-    global const float *conv_out,   // [C = 6144]: qk_dim=2048 (q, k), linear_inner=4096 (v)
+    global const float *conv_out,   // [C = 6144]: qk_dim=2048 (q, k), linear_inner=2048 (v)
     global const float *alpha_vec,  // [16]
     global const float *beta_vec,   // [16]
-    global float *delta_out,       // [linear_inner = 2048 / 4096]
+    global float *delta_out,       // [linear_inner = 2048]
     int key_dim,                    // 128
     int qk_dim,                     // 2048
-    int linear_inner                // 2048 / 4096
+    int linear_inner                // 2048
 ) {
-    local float l_delta[128];
-    local float l_sum[128];
-
     int h = get_group_id(0);       // Head index in [0, 15]
     int i = get_local_id(0);       // Row index in [0, 127]
 
@@ -664,43 +766,96 @@ kernel void qwen_gated_deltanet_step(
 
     float a_val = alpha_vec[h];
     float b_val = beta_vec[h];
-    float g = 1.0f - 1.0f / (1.0f + exp(-a_val));
+    float g = 1.0f / (1.0f + exp(a_val));
     float b = 1.0f / (1.0f + exp(-b_val));
 
     global float *S_h = ssm_state + (size_t)h * (key_dim * key_dim);
     global float *S_row = S_h + (size_t)i * key_dim;
 
-    float ki = k_head[i];
-    float qi = q_head[i];
+    float vi = v_head[i];
+    float pred = 0.0f;
 
-    // Compute u_j = sum_i (S_ij * k_i)
-    for (int j = 0; j < key_dim; j++) {
-        l_sum[i] = S_row[j] * ki;
-        barrier(CLK_LOCAL_MEM_FENCE);
-
-        for (int s = key_dim / 2; s > 0; s >>= 1) {
-            if (i < s) l_sum[i] += l_sum[i + s];
-            barrier(CLK_LOCAL_MEM_FENCE);
-        }
-        if (i == 0) {
-            float vj = v_head[j];
-            l_delta[j] = vj - l_sum[0];
-        }
-        barrier(CLK_LOCAL_MEM_FENCE);
+    for (int col = 0; col < key_dim; col++) {
+        float s = S_row[col] * g;
+        S_row[col] = s;
+        pred += s * k_head[col];
     }
 
-    // In-place state update: S_ij = g * S_ij + b * ki * delta_j
-    // And compute output element y_i = sum_j (S_ij * q_j)
+    float delta_i = b * (vi - pred);
     float yi = 0.0f;
-    for (int j = 0; j < key_dim; j++) {
-        float s_val = g * S_row[j] + b * ki * l_delta[j];
-        S_row[j] = s_val;
-        yi += s_val * q_head[j];
+
+    for (int col = 0; col < key_dim; col++) {
+        float s = S_row[col] + delta_i * k_head[col];
+        S_row[col] = s;
+        yi += s * q_head[col];
     }
 
-    // Write output to delta_out
     global float *out_head = delta_out + h * key_dim;
     out_head[i] = yi;
+}
+
+//------------------------------------------------------------------------------
+// Qwen 3.5 Full Attention Deinterleave Q & Sigmoid Gate
+//------------------------------------------------------------------------------
+kernel void qwen_deinterleave_q_gate(
+    global const float *q_full,
+    global float *q,
+    global float *gate,
+    int num_heads,
+    int head_dim
+) {
+    int idx = get_global_id(0);
+    int total = num_heads * head_dim;
+    if (idx >= total) return;
+    int h = idx / head_dim;
+    int d = idx % head_dim;
+    int src_base = h * (2 * head_dim);
+    q[idx] = q_full[src_base + d];
+    gate[idx] = q_full[src_base + head_dim + d];
+}
+
+//------------------------------------------------------------------------------
+// Qwen 3.5 Per-Head RMSNorm for Q and K
+//------------------------------------------------------------------------------
+kernel void qwen_per_head_rms_norm(
+    global float *dst,
+    global const float *src,
+    global const float *norm_w,
+    int num_heads,
+    int head_dim,
+    float eps
+) {
+    local float l_sq[256];
+    int h = get_group_id(0);
+    int d = get_local_id(0);
+    if (h >= num_heads || d >= head_dim) return;
+
+    float val = src[h * head_dim + d];
+    l_sq[d] = val * val;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    for (int s = head_dim / 2; s > 0; s >>= 1) {
+        if (d < s) l_sq[d] += l_sq[d + s];
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    float inv_rms = rsqrt(l_sq[0] / (float)head_dim + eps);
+    dst[h * head_dim + d] = val * inv_rms * norm_w[d];
+}
+
+//------------------------------------------------------------------------------
+// Qwen 3.5 Sigmoid Attention Output Gate Multiply
+//------------------------------------------------------------------------------
+kernel void qwen_attn_gate_mul(
+    global float *attn_out,
+    global const float *gate,
+    int n
+) {
+    int i = get_global_id(0);
+    if (i >= n) return;
+    float g = gate[i];
+    float sig = 1.0f / (1.0f + exp(-g));
+    attn_out[i] *= sig;
 }
 
 //------------------------------------------------------------------------------
@@ -709,20 +864,17 @@ kernel void qwen_gated_deltanet_step(
 //------------------------------------------------------------------------------
 kernel void qwen_full_attention_step(
     global const float *q_buf,        // [n_head * head_dim]
-    global const float *k_buf,        // [n_kv_head * head_dim]
-    global const float *v_buf,        // [n_kv_head * head_dim]
-    global float *k_cache,            // [max_seq * n_embd]
-    global float *v_cache,            // [max_seq * n_embd]
-    global float *attn_out,           // [n_embd]
+    global const float *k_cache,      // [max_seq * (n_kv_head * head_dim)]
+    global const float *v_cache,      // [max_seq * (n_kv_head * head_dim)]
+    global float *attn_out,           // [n_head * head_dim]
     int n_head,
     int n_kv_head,
     int head_dim,
-    int n_embd,
     int pos,
     int max_seq
 ) {
     local float l_scores[512];
-    local float l_dot[128];
+    local float l_dot[256];
 
     int h = get_group_id(0);
     int d = get_local_id(0);
@@ -731,13 +883,7 @@ kernel void qwen_full_attention_step(
 
     int q_per_kv = n_head / n_kv_head;
     int h_kv = h / (q_per_kv > 0 ? q_per_kv : 1);
-
-    // Save K and V to GPU cache in VRAM
-    if (h == 0 && d < n_kv_head * head_dim) {
-        k_cache[(size_t)pos * n_embd + d] = k_buf[d];
-        v_cache[(size_t)pos * n_embd + d] = v_buf[d];
-    }
-    barrier(CLK_GLOBAL_MEM_FENCE);
+    int kv_stride = n_kv_head * head_dim;
 
     int S = pos + 1;
     float inv_scale = rsqrt((float)head_dim);
@@ -746,7 +892,7 @@ kernel void qwen_full_attention_step(
     global const float *q_h = q_buf + h * head_dim;
 
     for (int s = 0; s < S && s < 512; s++) {
-        global const float *k_s = k_cache + (size_t)s * n_embd + h_kv * head_dim;
+        global const float *k_s = k_cache + (size_t)s * kv_stride + h_kv * head_dim;
         l_dot[d] = q_h[d] * k_s[d];
         barrier(CLK_LOCAL_MEM_FENCE);
 
@@ -769,7 +915,7 @@ kernel void qwen_full_attention_step(
             l_scores[s] = exp(l_scores[s] - maxv);
             sum += l_scores[s];
         }
-        float inv_sum = 1.0f / sum;
+        float inv_sum = 1.0f / (sum > 0.0f ? sum : 1.0f);
         for (int s = 0; s < S && s < 512; s++) l_scores[s] *= inv_sum;
     }
     barrier(CLK_LOCAL_MEM_FENCE);
@@ -778,7 +924,7 @@ kernel void qwen_full_attention_step(
     float acc = 0.0f;
     for (int s = 0; s < S && s < 512; s++) {
         float w = l_scores[s];
-        global const float *v_s = v_cache + (size_t)s * n_embd + h_kv * head_dim;
+        global const float *v_s = v_cache + (size_t)s * kv_stride + h_kv * head_dim;
         acc += w * v_s[d];
     }
 
@@ -793,7 +939,9 @@ kernel void rope_f32(
     int n_embd,
     int n_head,
     int pos,
-    int n_tokens
+    int n_tokens,
+    float freq_base,
+    int rope_dim
 ) {
     int token = get_global_id(0);
     int h_idx = get_global_id(1);
@@ -802,17 +950,18 @@ kernel void rope_f32(
     if (token >= n_tokens || h_idx >= n_head) return;
 
     int head_dim = n_embd / n_head;
-    if (hh >= head_dim / 2) return;
+    int r_dim = (rope_dim > 0 && rope_dim <= head_dim) ? rope_dim : head_dim;
+    if (hh >= r_dim / 2) return;
 
     global float *row = x + (size_t)token * n_embd + (size_t)h_idx * head_dim;
-    float theta = (float)pos * pow(10000.0f, -2.0f * (float)hh / (float)head_dim);
+    float theta = (float)pos * pow(freq_base, -2.0f * (float)hh / (float)r_dim);
     float cos_t = cos(theta);
     float sin_t = sin(theta);
 
     float v0 = row[hh];
-    float v1 = row[hh + head_dim / 2];
+    float v1 = row[hh + r_dim / 2];
     row[hh] = v0 * cos_t - v1 * sin_t;
-    row[hh + head_dim / 2] = v0 * sin_t + v1 * cos_t;
+    row[hh + r_dim / 2] = v0 * sin_t + v1 * cos_t;
 }
 
 //------------------------------------------------------------------------------
@@ -920,3 +1069,199 @@ kernel void fill_f32(
     if (i >= n) return;
     buf[i] = val;
 }
+
+//------------------------------------------------------------------------------
+// FUSED RECURRENT DELTANET OPERATOR:
+// Combines: Q/K L2Norm + DeltaNet Step + SSM RMSNorm + Attn Gate SiLU + Elementwise Multiply
+// Dispatched with: Global = 16 * 128, Local = 128
+//------------------------------------------------------------------------------
+kernel void qwen_gated_deltanet_fused(
+    global float *ssm_state,         // [16, 128, 128]
+    global const float *conv_out,    // [C = 6144]: qk_dim=2048 (q, k), linear_inner=2048 (v)
+    global const float *alpha_vec,   // [16]
+    global const float *beta_vec,    // [16]
+    global const float *ssm_a,       // [16]
+    global const float *ssm_dt,      // [16]
+    global const float *ssm_norm_w,  // [128]
+    global const float *attn_gate,   // [linear_inner = 2048]
+    global float *delta_out,         // [linear_inner = 2048]
+    int key_dim,                     // 128
+    int qk_dim,                      // 2048
+    int linear_inner,                // 2048
+    float norm_eps                   // 1e-6f
+) {
+    local float l_sq[128];
+    local float l_q[128];
+    local float l_k[128];
+
+    int h = get_group_id(0);         // Head index in [0, 15]
+    int i = get_local_id(0);         // Row index in [0, 127]
+
+    if (h >= 16 || i >= key_dim) return;
+
+    int key_heads = 16;
+    int heads_per_group = 16 / key_heads;
+    int kh = h / (heads_per_group > 0 ? heads_per_group : 1);
+
+    global const float *q_head = conv_out + kh * key_dim;
+    global const float *k_head = conv_out + qk_dim + kh * key_dim;
+    global const float *v_head = conv_out + 2 * qk_dim + h * key_dim;
+
+    // 1. L2 Normalize Q and K per head with local memory reduction
+    float qi = q_head[i];
+    float ki = k_head[i];
+
+    l_sq[i] = qi * qi;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int s = 64; s > 0; s >>= 1) {
+        if (i < s) l_sq[i] += l_sq[i + s];
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    float norm_q = rsqrt(l_sq[0] + 1e-6f);
+    // Scale Q by 1 / sqrt(head_dim) = 1 / sqrt(128.0f) = 0.0883883476f
+    l_q[i] = (qi * norm_q) * 0.0883883476f;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    l_sq[i] = ki * ki;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int s = 64; s > 0; s >>= 1) {
+        if (i < s) l_sq[i] += l_sq[i + s];
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    float norm_k = rsqrt(l_sq[0] + 1e-6f);
+    l_k[i] = ki * norm_k;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    // 2. Compute decay and beta update gate using ssm_a and ssm_dt
+    float a_param = (ssm_a != 0) ? ssm_a[h] : -1.0f;
+    float dt_val  = (ssm_dt != 0) ? ssm_dt[h] : 0.0f;
+    float alpha_biased = alpha_vec[h] + dt_val;
+    float sp = (alpha_biased > 20.0f) ? alpha_biased : log(1.0f + exp(alpha_biased));
+    float g = exp(sp * a_param);
+    float b = 1.0f / (1.0f + exp(-beta_vec[h]));
+
+    // 3. Recurrent DeltaNet step
+    global float *S_h = ssm_state + (size_t)h * (key_dim * key_dim);
+    global float *S_row = S_h + (size_t)i * key_dim;
+
+    float vi = v_head[i];
+    float pred = 0.0f;
+
+    for (int col = 0; col < key_dim; col++) {
+        float s = S_row[col] * g;
+        S_row[col] = s;
+        pred += s * l_k[col];
+    }
+
+    float delta_i = b * (vi - pred);
+    float yi = 0.0f;
+
+    for (int col = 0; col < key_dim; col++) {
+        float s = S_row[col] + delta_i * l_k[col];
+        S_row[col] = s;
+        yi += s * l_q[col];
+    }
+
+    // 4. In-Group SSM RMSNorm over head h
+    l_sq[i] = yi * yi;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    for (int s = 64; s > 0; s >>= 1) {
+        if (i < s) {
+            l_sq[i] += l_sq[i + s];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    float mean_sq = l_sq[0] / (float)key_dim;
+    float inv_rms = rsqrt(mean_sq + norm_eps);
+    float w_norm = (ssm_norm_w != 0) ? ssm_norm_w[i] : 1.0f;
+    yi = yi * inv_rms * w_norm;
+
+    // 5. Gating with attn_gate via SiLU
+    if (attn_gate != 0) {
+        float g_val = attn_gate[h * key_dim + i];
+        float g_act = g_val / (1.0f + exp(-g_val));
+        yi = yi * g_act;
+    }
+
+    global float *out_head = delta_out + h * key_dim;
+    out_head[i] = yi;
+}
+
+//------------------------------------------------------------------------------
+// GPU LOGITS ARGMAX REDUCTION (Greedy decoding: 4 bytes transferred to CPU!)
+// Global = 1024, Local = 1024 (Single workgroup grid-stride reduction)
+//------------------------------------------------------------------------------
+kernel void logits_argmax(
+    global const float *logits,
+    int N,
+    global int *out_token,
+    global float *out_max_val
+) {
+    local float l_max_val[1024];
+    local int   l_max_idx[1024];
+
+    int tid = get_local_id(0);
+    int wg_size = get_local_size(0);
+
+    float max_val = -1e30f;
+    int max_idx = 0;
+
+    for (int i = tid; i < N; i += wg_size) {
+        float val = logits[i];
+        if (val > max_val) {
+            max_val = val;
+            max_idx = i;
+        }
+    }
+
+    l_max_val[tid] = max_val;
+    l_max_idx[tid] = max_idx;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    for (int s = wg_size / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            if (l_max_val[tid + s] > l_max_val[tid]) {
+                l_max_val[tid] = l_max_val[tid + s];
+                l_max_idx[tid] = l_max_idx[tid + s];
+            }
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    if (tid == 0) {
+        *out_token = l_max_idx[0];
+        if (out_max_val != 0) {
+            *out_max_val = l_max_val[0];
+        }
+    }
+}
+
+//------------------------------------------------------------------------------
+// GPU LOGITS TOP CANDIDATE FILTER (Temperature sampling: <= 64 candidates)
+//------------------------------------------------------------------------------
+kernel void logits_filter_candidates(
+    global const float *logits,
+    int N,
+    float threshold,
+    global volatile int *candidate_count,
+    global float *out_logits,
+    global int *out_ids,
+    int max_candidates
+) {
+    int tid = get_global_id(0);
+    int stride = get_global_size(0);
+
+    for (int i = tid; i < N; i += stride) {
+        float val = logits[i];
+        if (val >= threshold) {
+            int slot = atomic_inc(candidate_count);
+            if (slot < max_candidates) {
+                out_logits[slot] = val;
+                out_ids[slot] = i;
+            }
+        }
+    }
+}
+

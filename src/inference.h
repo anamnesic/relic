@@ -30,7 +30,7 @@ struct InferenceEngine
     void free_buffers();
 
     // Forward pass for one token
-    int forward(int token_id, float *logits);
+    int forward(int token_id, float *logits = nullptr, bool compute_output = true);
 
     // Generate text
     std::string generate(const std::string &prompt, int max_tokens = 256,

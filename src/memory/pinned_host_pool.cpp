@@ -2,13 +2,19 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
 
 PinnedHostPool::PinnedHostPool(size_t capacity_bytes)
     : capacity_(capacity_bytes), used_offset_(0), host_ptr_(nullptr), is_locked_(false)
 {
     if (capacity_ > 0)
     {
+#ifdef _WIN32
         // Allocate virtual memory with 64-byte alignment
         host_ptr_ = VirtualAlloc(nullptr, capacity_, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         if (host_ptr_)
@@ -31,6 +37,20 @@ PinnedHostPool::PinnedHostPool(size_t capacity_bytes)
                 }
             }
         }
+#else
+        host_ptr_ = mmap(nullptr, capacity_, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (host_ptr_ == MAP_FAILED)
+        {
+            host_ptr_ = nullptr;
+        }
+        else
+        {
+            if (mlock(host_ptr_, capacity_) == 0)
+            {
+                is_locked_ = true;
+            }
+        }
+#endif
     }
 }
 
@@ -40,10 +60,18 @@ PinnedHostPool::~PinnedHostPool()
     {
         if (is_locked_)
         {
+#ifdef _WIN32
             VirtualUnlock(host_ptr_, capacity_);
+#else
+            munlock(host_ptr_, capacity_);
+#endif
             is_locked_ = false;
         }
+#ifdef _WIN32
         VirtualFree(host_ptr_, 0, MEM_RELEASE);
+#else
+        munmap(host_ptr_, capacity_);
+#endif
         host_ptr_ = nullptr;
     }
 }

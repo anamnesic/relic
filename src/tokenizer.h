@@ -24,6 +24,7 @@ struct Tokenizer {
         int new_id;
     };
     std::vector<Merge> merges;
+    std::unordered_map<uint64_t, int> merge_ranks;
     bool is_bpe = false;
 
     bool load_from_gguf(class GgufReader &reader);

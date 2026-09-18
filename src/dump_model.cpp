@@ -36,6 +36,14 @@ int main(int argc, char **argv) {
             fprintf(stdout, "%lld", (long long)info.dims[d]);
         }
         fprintf(stdout, "]\n");
+        if (info.type == GgmlType::F32 && info.dims.size() == 1 && info.dims[0] <= 16) {
+            const float *data = (const float *)reader.tensor_data(name);
+            if (data) {
+                fprintf(stdout, "    vals: [");
+                for (int64_t i = 0; i < info.dims[0]; i++) fprintf(stdout, "%s%.4f", i ? ", " : "", data[i]);
+                fprintf(stdout, "]\n");
+            }
+        }
     }
     return 0;
 }

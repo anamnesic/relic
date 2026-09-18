@@ -4,12 +4,20 @@
 #include <fstream>
 #include <sstream>
 #include <iostream>
+#include <cstring>
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <sys/sysinfo.h>
+#include <unistd.h>
+#include <thread>
+#endif
 
 HardwareProfile HardwareProfile::probe_system()
 {
     HardwareProfile prof;
 
+#ifdef _WIN32
     // 1. Host Memory
     MEMORYSTATUSEX mem_info;
     mem_info.dwLength = sizeof(MEMORYSTATUSEX);
@@ -24,6 +32,57 @@ HardwareProfile HardwareProfile::probe_system()
     GetSystemInfo(&sys_info);
     prof.cpu_cores = sys_info.dwNumberOfProcessors;
     prof.cpu_brand = "Intel Core i5-11400H / x86_64";
+#else
+    // 1. Host Memory
+    struct sysinfo si;
+    if (sysinfo(&si) == 0)
+    {
+        prof.host_ram_total_bytes = (size_t)si.totalram * si.mem_unit;
+        prof.host_ram_available_bytes = (size_t)si.freeram * si.mem_unit;
+    }
+    std::ifstream meminfo("/proc/meminfo");
+    if (meminfo.is_open())
+    {
+        std::string line;
+        while (std::getline(meminfo, line))
+        {
+            if (line.compare(0, 13, "MemAvailable:") == 0)
+            {
+                size_t kb = 0;
+                if (sscanf(line.c_str(), "MemAvailable: %zu kB", &kb) == 1)
+                {
+                    prof.host_ram_available_bytes = kb * 1024;
+                }
+                break;
+            }
+        }
+    }
+
+    // 2. CPU
+    prof.cpu_cores = (int)sysconf(_SC_NPROCESSORS_ONLN);
+    if (prof.cpu_cores <= 0)
+    {
+        prof.cpu_cores = (int)std::thread::hardware_concurrency();
+    }
+    prof.cpu_brand = "Linux / x86_64";
+    std::ifstream cpuinfo("/proc/cpuinfo");
+    if (cpuinfo.is_open())
+    {
+        std::string line;
+        while (std::getline(cpuinfo, line))
+        {
+            if (line.compare(0, 10, "model name") == 0)
+            {
+                size_t colon = line.find(':');
+                if (colon != std::string::npos && colon + 2 < line.size())
+                {
+                    prof.cpu_brand = line.substr(colon + 2);
+                }
+                break;
+            }
+        }
+    }
+#endif
 
     // 3. OpenCL / GPU Devices
     cl_uint num_platforms = 0;
@@ -181,3 +240,10 @@ bool HardwareProfile::save_to_file(const std::string &path) const
     out << "}\n";
     return true;
 }
+
+HardwareProfile HardwareProfile::load_from_file(const std::string &path)
+{
+    (void)path;
+    return probe_system();
+}
+

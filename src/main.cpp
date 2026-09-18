@@ -6,10 +6,18 @@
 #include "planner/hardware_profile.h"
 #include "planner/adaptive_planner.h"
 #include "benchmark_suite.h"
+#include "server.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
+
+using Gpt2Tokenizer = Tokenizer;
+
+static bool load_model(const std::string &path, LlamaModel &model)
+{
+    return model.load(path.c_str());
+}
 
 void print_usage(const char *prog)
 {
@@ -33,7 +41,12 @@ void print_usage(const char *prog)
     fprintf(stdout, "  --speculative         Enable speculative decoding\n");
     fprintf(stdout, "  --ngram <int>         Speculative n-gram size (default: 3)\n");
     fprintf(stdout, "  --draft-max <int>     Speculative max draft tokens (default: 3)\n");
-    fprintf(stdout, "  --max-seq-len <int>   Maximum sequence length (default: 2048)\n");
+    fprintf(stdout, "  -i, --interactive     Keep model resident in GPU VRAM and enter interactive REPL\n");
+    fprintf(stdout, "  --server [port]       Run as persistent VRAM HTTP/TCP server daemon (default: 8080)\n");
+    fprintf(stdout, "  --client [port]       Query running persistent server without reloading model\n");
+    fprintf(stdout, "  --max-seq-len <int>   Maximum sequence length (default: 2048)\n\n");
+    fprintf(stdout, "Available OpenCL platforms & devices:\n");
+    OpenClBackend::list_devices();
 }
 
 int main(int argc, char **argv)
@@ -63,6 +76,11 @@ int main(int argc, char **argv)
     bool run_cliff_analysis = false;
     int bench_runs = 5;
     int bench_warmup = 2;
+    bool interactive = false;
+    bool server_mode = false;
+    int server_port = 8080;
+    bool client_mode = false;
+    int client_port = 8080;
 
     for (int i = 1; i < argc; i++)
     {
@@ -76,6 +94,20 @@ int main(int argc, char **argv)
             temperature = (float)atof(argv[++i]);
         else if (strcmp(argv[i], "-k") == 0 && i + 1 < argc)
             top_k = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--interactive") == 0)
+            interactive = true;
+        else if (strcmp(argv[i], "--server") == 0)
+        {
+            server_mode = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                server_port = atoi(argv[++i]);
+        }
+        else if (strcmp(argv[i], "--client") == 0)
+        {
+            client_mode = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                client_port = atoi(argv[++i]);
+        }
         else if (strcmp(argv[i], "--runs") == 0 && i + 1 < argc)
             bench_runs = atoi(argv[++i]);
         else if (strcmp(argv[i], "--warmup") == 0 && i + 1 < argc)
@@ -125,6 +157,11 @@ int main(int argc, char **argv)
         }
     }
 
+    if (client_mode)
+    {
+        return run_relic_client(client_port, prompt, n_tokens, temperature, top_k);
+    }
+
     if (run_profile)
     {
         fprintf(stdout, "=== Relic Hardware Profiler ===\n");
@@ -150,6 +187,13 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    if (list_devices)
+    {
+        fprintf(stdout, "Available OpenCL platforms & devices:\n");
+        OpenClBackend::list_devices();
+        return 0;
+    }
+
     if (model_path.empty())
     {
         print_usage(argv[0]);
@@ -159,9 +203,9 @@ int main(int argc, char **argv)
     // Load model
     fprintf(stdout, "Loading model...\n");
     LlamaModel model;
-    if (!model.load(model_path.c_str()))
+    if (!load_model(model_path, model))
     {
-        fprintf(stderr, "Failed to load model\n");
+        fprintf(stderr, "Failed to load model from %s\n", model_path.c_str());
         return 1;
     }
 
@@ -491,6 +535,20 @@ int main(int argc, char **argv)
             fprintf(stdout, "Benchmark results exported to CSV: %s\n", bench_csv_path.c_str());
         }
 
+        return 0;
+    }
+
+    if (server_mode)
+    {
+        run_relic_server(engine, server_port, n_tokens, temperature, top_k);
+        engine.free_buffers();
+        return 0;
+    }
+
+    if (interactive)
+    {
+        run_relic_interactive(engine, n_tokens, temperature, top_k);
+        engine.free_buffers();
         return 0;
     }
 

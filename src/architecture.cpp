@@ -50,6 +50,7 @@ public:
         spec.n_ff = reader.get_metadata<int64_t>("qwen35.feed_forward_length", 0);
         spec.norm_eps = reader.get_metadata<float>("qwen35.attention.layer_norm_rms_epsilon", 1e-6f);
         spec.rope_freq_base = reader.get_metadata<float>("qwen35.rope.freq_base", 10000000.0f);
+        spec.rope_dimension_count = reader.get_metadata<int64_t>("qwen35.rope.dimension_count", 64);
         spec.full_attention_interval = reader.get_metadata<int64_t>("qwen35.full_attention_interval", 4);
         spec.linear_conv_kernel = reader.get_metadata<int64_t>("qwen35.ssm.conv_kernel", 0);
         spec.linear_inner_size = reader.get_metadata<int64_t>("qwen35.ssm.inner_size", 0);

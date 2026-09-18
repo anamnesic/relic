@@ -11,8 +11,10 @@ bool Tokenizer::load_from_gguf(GgufReader &reader) {
     fprintf(stdout, "Tokenizer model: %s\n", model_type.c_str());
 
     // Read vocabulary
-    int64_t n_vocab = reader.get_metadata<uint32_t>("tokenizer.ggml.vocab_size",
-                       reader.get_metadata<uint32_t>("llama.vocab_size", 32000));
+    int64_t n_vocab = reader.get_metadata<int64_t>("tokenizer.ggml.tokens.count", 0);
+    if (n_vocab <= 0) n_vocab = reader.get_metadata<int64_t>("tokenizer.ggml.vocab_size", 0);
+    if (n_vocab <= 0) n_vocab = reader.get_metadata<int64_t>("qwen35.vocab_size", 0);
+    if (n_vocab <= 0) n_vocab = reader.get_metadata<int64_t>("llama.vocab_size", 32000);
 
     vocab.clear();
     vocab.reserve((size_t)n_vocab);
@@ -49,22 +51,21 @@ bool Tokenizer::load_from_gguf(GgufReader &reader) {
 
     // For BPE, read merges
     if (is_bpe) {
-        // GGUF stores merges as an array of strings under
-        // "tokenizer.ggml.merges" key, which the reader expands to
-        // individual "tokenizer.ggml.merges_0", "_1", etc.
-        // Count how many merge entries exist
-        int64_t n_merges = 0;
-        for (int64_t i = 0; ; i++) {
-            std::string key = "tokenizer.ggml.merges_" + std::to_string(i);
-            if (reader.metadata_str.find(key) != reader.metadata_str.end()) {
-                n_merges = i + 1;
-            } else {
-                break;
+        int64_t n_merges = reader.get_metadata<int64_t>("tokenizer.ggml.merges.count", 0);
+        if (n_merges <= 0) {
+            for (int64_t i = 0; ; i++) {
+                std::string key = "tokenizer.ggml.merges_" + std::to_string(i);
+                if (reader.metadata_str.find(key) != reader.metadata_str.end()) {
+                    n_merges = i + 1;
+                } else {
+                    break;
+                }
             }
         }
 
         if (n_merges > 0) {
             merges.reserve((size_t)n_merges);
+            merge_ranks.reserve((size_t)n_merges);
             for (int64_t i = 0; i < n_merges; i++) {
                 std::string key = "tokenizer.ggml.merges_" + std::to_string(i);
                 std::string merge_str = reader.get_metadata<std::string>(key, "");
@@ -83,6 +84,8 @@ bool Tokenizer::load_from_gguf(GgufReader &reader) {
                         auto merged_it = token_to_id.find(left + right);
                         if (merged_it != token_to_id.end()) {
                             m.new_id = merged_it->second;
+                            uint64_t pair_key = ((uint64_t)(uint32_t)m.left_id << 32) | (uint32_t)m.right_id;
+                            merge_ranks[pair_key] = (int)merges.size();
                             merges.push_back(m);
                         }
                     }
@@ -196,13 +199,12 @@ std::vector<int> Tokenizer::encode_bpe(const std::string &text, int max_len) con
             int best_pos = -1;
 
             for (size_t i = 0; i + 1 < word_ids.size(); i++) {
-                for (size_t m = 0; m < merges.size(); m++) {
-                    if (merges[m].left_id == word_ids[i] && merges[m].right_id == word_ids[i + 1]) {
-                        if ((int)m < best_rank) {
-                            best_rank = (int)m;
-                            best_pos = (int)i;
-                        }
-                        break;
+                uint64_t pair_key = ((uint64_t)(uint32_t)word_ids[i] << 32) | (uint32_t)word_ids[i + 1];
+                auto it = merge_ranks.find(pair_key);
+                if (it != merge_ranks.end()) {
+                    if (it->second < best_rank) {
+                        best_rank = it->second;
+                        best_pos = (int)i;
                     }
                 }
             }
@@ -307,11 +309,55 @@ std::vector<int> Tokenizer::encode(const std::string &text, int max_len) const {
 }
 
 std::string Tokenizer::decode(const std::vector<int> &tokens) const {
-    std::string result;
+    static const auto inv_byte_table = []() {
+        std::unordered_map<uint32_t, uint8_t> inv;
+        std::vector<uint32_t> table = build_gpt2_byte_table();
+        for (int b = 0; b < 256; b++) {
+            inv[table[b]] = (uint8_t)b;
+        }
+        return inv;
+    }();
+
+    std::string raw;
     for (int id : tokens) {
         if (id >= 0 && id < (int)vocab.size()) {
-            result += vocab[id].text;
+            raw += vocab[id].text;
         }
+    }
+
+    if (!is_bpe) return raw;
+
+    // Decode UTF-8 codepoints and invert GPT-2 byte encoding to restore original UTF-8 text
+    std::string result;
+    for (size_t i = 0; i < raw.size(); ) {
+        unsigned char c = (unsigned char)raw[i];
+        uint32_t cp = 0;
+        int len = 1;
+        if ((c & 0x80) == 0) {
+            cp = c;
+            len = 1;
+        } else if ((c & 0xE0) == 0xC0 && i + 1 < raw.size()) {
+            cp = ((c & 0x1F) << 6) | ((unsigned char)raw[i + 1] & 0x3F);
+            len = 2;
+        } else if ((c & 0xF0) == 0xE0 && i + 2 < raw.size()) {
+            cp = ((c & 0x0F) << 12) | (((unsigned char)raw[i + 1] & 0x3F) << 6) | ((unsigned char)raw[i + 2] & 0x3F);
+            len = 3;
+        } else if ((c & 0xF8) == 0xF0 && i + 3 < raw.size()) {
+            cp = ((c & 0x07) << 18) | (((unsigned char)raw[i + 1] & 0x3F) << 12) | (((unsigned char)raw[i + 2] & 0x3F) << 6) | ((unsigned char)raw[i + 3] & 0x3F);
+            len = 4;
+        } else {
+            result += (char)c;
+            i++;
+            continue;
+        }
+
+        auto it = inv_byte_table.find(cp);
+        if (it != inv_byte_table.end()) {
+            result += (char)it->second;
+        } else {
+            result.append(raw, i, len);
+        }
+        i += len;
     }
     return result;
 }
