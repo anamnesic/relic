@@ -53,9 +53,59 @@ void Qwen35WeightsManager::ensure_weights_uploaded(const LlamaModel &model)
     size_t total_original = 0;
     size_t total_offloaded_to_host = 0;
 
+    // 1. Fuse QKV and Gate weights for recurrent layers
+    for (int64_t l = 0; l < arch_.n_layer; l++)
+    {
+        bool is_full_attn = (arch_.full_attention_interval > 0) &&
+                            ((l + 1) % arch_.full_attention_interval == 0);
+        if (is_full_attn) continue;
+
+        std::string prefix = "blk." + std::to_string(l) + ".";
+        auto it_qkv = model.tensors.find(prefix + "attn_qkv.weight");
+        auto it_gate = model.tensors.find(prefix + "attn_gate.weight");
+        if (it_qkv != model.tensors.end() && it_gate != model.tensors.end())
+        {
+            const auto &t_qkv = it_qkv->second;
+            const auto &t_gate = it_gate->second;
+            if (t_qkv.type == t_gate.type)
+            {
+                std::vector<uint8_t> fused_data;
+                fused_data.reserve(t_qkv.data.size() + t_gate.data.size());
+                fused_data.insert(fused_data.end(), t_qkv.data.begin(), t_qkv.data.end());
+                fused_data.insert(fused_data.end(), t_gate.data.begin(), t_gate.data.end());
+
+                int64_t total_elems = t_qkv.nelements() + t_gate.nelements();
+                size_t uploaded_bytes = 0;
+                std::string fused_name = prefix + "attn_qkv_gate.weight";
+                if (gpu_store_.upload_auto_q4(cl_->dev.context, cl_->dev.queue, fused_name,
+                                             fused_data.data(), fused_data.size(), t_qkv.type,
+                                             total_elems, uploaded_bytes))
+                {
+                    total_uploaded += uploaded_bytes;
+                }
+            }
+        }
+    }
+
     for (const auto &kv : model.tensors)
     {
         total_original += kv.second.data.size();
+
+        size_t blk_pos = kv.first.find("blk.");
+        if (blk_pos != std::string::npos)
+        {
+            size_t dot_pos = kv.first.find('.', blk_pos + 4);
+            if (dot_pos != std::string::npos)
+            {
+                std::string prefix = kv.first.substr(0, dot_pos + 1);
+                if ((kv.first == prefix + "attn_qkv.weight" || kv.first == prefix + "attn_gate.weight") &&
+                    gpu_store_.get(prefix + "attn_qkv_gate.weight") != nullptr)
+                {
+                    continue; // Already resident in fused GPU VRAM buffer
+                }
+            }
+        }
+
         size_t uploaded_bytes = 0;
 
         BackendDeviceType target_dev = BackendDeviceType::NVIDIA_GPU;

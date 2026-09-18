@@ -175,8 +175,9 @@
   - [x] Automated comparative benchmark table vs llama.cpp / Ollama format.
 - [x] **6. Fused Recurrent Operators for Hybrid Architectures** (*Gated DeltaNet - Jul/2026*):
   - [x] Fused DeltaNet recurrence operator (`qwen_gated_deltanet_fused`): State Update $\to$ In-Group RMSNorm $\to$ SiLU Gating executed in a single kernel launch.
-- [ ] **7. In-Kernel KV Quantization & LUT Ultra-Low-Bit** (*SAW-INT4 & FluxBin*):
-  - [ ] Inline rotation + quantization in attention kernels.
+- [x] **7. In-Kernel KV Quantization & LUT Ultra-Low-Bit** (*SAW-INT4 & FluxBin*):
+  - [x] In-kernel FP16 KV cache append (`kv_cache_append_fp16`): Store half-precision K and V on-the-fly, halving cache VRAM footprint and memory bandwidth during attention.
+  - [x] Quantized causal attention step (`qwen_full_attention_step_fp16`): On-the-fly dequantization in registers during dot-product attention.
   - [ ] Experimental LUT-based Q2/Q3 backend for 1GB VRAM hardware.
 
 ---
@@ -227,6 +228,11 @@
   - [x] Scale `gemv_q4_0` workgroup execution to 4 warps (128 threads) processing 16 rows per block (`l_sum[4][32]`).
   - [x] Double shared memory activation reuse across 16 rows, halving global-to-shared memory bandwidth overhead.
   - [x] Increase physical SM hardware occupancy to 768 threads per SM (75% theoretical hardware limit on NVIDIA Turing).
+- [x] **7. Fused Recurrent Projections (QKV + Gate GEMV)**:
+  - [x] Concatenate `attn_qkv` and `attn_gate` into a unified projection pass ($N = 8192, K = 2048$) in `Qwen35RecurrentBlock`.
+  - [x] Eliminate 18 sequential GEMV dispatches and redundant activation loads from global memory per token.
+- [x] **8. Multi-Row 16x Tiling in FFN SwiGLU (`gemv_q4_0_ffn_swiglu`)**:
+  - [x] Scale workgroup size to 128 threads processing 16 rows per block, reducing FFN workgroups from 768 to 384.
 
 ---
 
@@ -237,9 +243,10 @@
 - [x] In-VRAM GPU Embedding Lookup & Skip Prompt Logits: `29.71 tok/s` Prompt
 - [x] Vectorized 128-bit Memory Transactions & Dynamic Local Memory Occupancy: `13.95 tok/s` Decode (+18.6% speedup)
 - [x] Multi-Row 16x Tiled GEMV & 4-Warp Concurrency: `14.67 tok/s` Decode (+24.7% cumulative speedup)
+- [x] Fused QKV+Gate, Multi-Row 16x FFN SwiGLU & In-Kernel FP16 KV Cache: `15.47 tok/s` Decode (+31.5% cumulative speedup, 19.44 tok/s prefill)
 - [x] Phase 1 Decoupled Engine validation (100% tests passed).
 - [x] Phase 2 Async Prefetcher & Pinned Host Pool validation (100% tests passed).
-- [x] Phase 3 Distributed Speculative Engine validation with Batched Verification (100% tests passed).
+- [x] Phase 3 Distributed Speculative Batched Verification validation (100% tests passed).
 - [x] Phase 3 Intel UHD Compute Kernels & Zero-Copy Backend validation (100% tests passed).
 - [x] Phase 4 ATSInfer Tensor Planner & Static Memory Plan on 4GB / 1GB VRAM targets.
 - [x] Layer-by-layer Numerical Reference Self-Tests (100% tests passed).

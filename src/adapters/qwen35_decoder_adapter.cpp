@@ -57,7 +57,7 @@ bool Qwen35DecoderAdapter::init(const ArchitectureSpec &spec, int64_t max_seq_le
         gpu_gate.alloc(cl->dev.context, (size_t)n_ff * sizeof(float));
         gpu_up.alloc(cl->dev.context, (size_t)n_ff * sizeof(float));
         gpu_ffn_act.alloc(cl->dev.context, (size_t)n_ff * sizeof(float));
-        gpu_conv_in.alloc(cl->dev.context, (size_t)total_qkv * sizeof(float));
+        gpu_conv_in.alloc(cl->dev.context, (size_t)(total_qkv + linear_inner) * sizeof(float));
         gpu_conv_out.alloc(cl->dev.context, (size_t)total_qkv * sizeof(float));
         gpu_delta_out.alloc(cl->dev.context, (size_t)linear_inner * sizeof(float));
         gpu_q_full.alloc(cl->dev.context, (size_t)(2 * q_size) * sizeof(float));
@@ -92,12 +92,13 @@ bool Qwen35DecoderAdapter::init(const ArchitectureSpec &spec, int64_t max_seq_le
                                 (((int64_t)l + 1) % arch.full_attention_interval == 0);
             if (is_full_attn)
             {
-                gpu_k_caches[l].alloc(cl->dev.context, (size_t)(max_seq_len * kv_size * sizeof(float)));
-                gpu_v_caches[l].alloc(cl->dev.context, (size_t)(max_seq_len * kv_size * sizeof(float)));
-                gpu_k_snapshot_[l].alloc(cl->dev.context, (size_t)(max_seq_len * kv_size * sizeof(float)));
-                gpu_v_snapshot_[l].alloc(cl->dev.context, (size_t)(max_seq_len * kv_size * sizeof(float)));
-                cl->fill(gpu_k_caches[l], 0.0f, max_seq_len * kv_size);
-                cl->fill(gpu_v_caches[l], 0.0f, max_seq_len * kv_size);
+                // In-Kernel FP16 KV Cache: uint16_t half precision (50% VRAM saving)
+                gpu_k_caches[l].alloc(cl->dev.context, (size_t)(max_seq_len * kv_size * sizeof(uint16_t)));
+                gpu_v_caches[l].alloc(cl->dev.context, (size_t)(max_seq_len * kv_size * sizeof(uint16_t)));
+                gpu_k_snapshot_[l].alloc(cl->dev.context, (size_t)(max_seq_len * kv_size * sizeof(uint16_t)));
+                gpu_v_snapshot_[l].alloc(cl->dev.context, (size_t)(max_seq_len * kv_size * sizeof(uint16_t)));
+                cl->fill(gpu_k_caches[l], 0.0f, (max_seq_len * kv_size + 1) / 2);
+                cl->fill(gpu_v_caches[l], 0.0f, (max_seq_len * kv_size + 1) / 2);
             }
         }
 
@@ -119,12 +120,18 @@ void Qwen35DecoderAdapter::save_state_checkpoint()
     if (use_gpu && cl && cl->initialized)
     {
         int64_t total_qkv = 2 * arch.linear_key_heads * arch.linear_key_head_dim + arch.linear_inner_size;
+        int64_t hd = (arch.n_head > 0) ? (arch.n_embd / arch.n_head) : 256;
+        int64_t kv_sz = arch.n_head_kv * hd;
         for (size_t l = 0; l < gpu_ssm_states.size(); l++)
         {
             if (gpu_ssm_states[l].mem && l < gpu_ssm_snapshot_.size() && gpu_ssm_snapshot_[l].mem)
                 clEnqueueCopyBuffer(cl->dev.queue, gpu_ssm_states[l].mem, gpu_ssm_snapshot_[l].mem, 0, 0, 16 * 128 * 128 * sizeof(float), 0, nullptr, nullptr);
             if (gpu_conv_states[l].mem && l < gpu_conv_snapshot_.size() && gpu_conv_snapshot_[l].mem)
                 clEnqueueCopyBuffer(cl->dev.queue, gpu_conv_states[l].mem, gpu_conv_snapshot_[l].mem, 0, 0, (size_t)(3 * total_qkv * sizeof(float)), 0, nullptr, nullptr);
+            if (gpu_k_caches[l].mem && l < gpu_k_snapshot_.size() && gpu_k_snapshot_[l].mem)
+                clEnqueueCopyBuffer(cl->dev.queue, gpu_k_caches[l].mem, gpu_k_snapshot_[l].mem, 0, 0, (size_t)(seq_limit * kv_sz * sizeof(uint16_t)), 0, nullptr, nullptr);
+            if (gpu_v_caches[l].mem && l < gpu_v_snapshot_.size() && gpu_v_snapshot_[l].mem)
+                clEnqueueCopyBuffer(cl->dev.queue, gpu_v_caches[l].mem, gpu_v_snapshot_[l].mem, 0, 0, (size_t)(seq_limit * kv_sz * sizeof(uint16_t)), 0, nullptr, nullptr);
         }
         clFinish(cl->dev.queue);
     }
@@ -138,12 +145,18 @@ void Qwen35DecoderAdapter::restore_state_checkpoint()
     if (use_gpu && cl && cl->initialized)
     {
         int64_t total_qkv = 2 * arch.linear_key_heads * arch.linear_key_head_dim + arch.linear_inner_size;
+        int64_t hd = (arch.n_head > 0) ? (arch.n_embd / arch.n_head) : 256;
+        int64_t kv_sz = arch.n_head_kv * hd;
         for (size_t l = 0; l < gpu_ssm_states.size(); l++)
         {
             if (gpu_ssm_states[l].mem && l < gpu_ssm_snapshot_.size() && gpu_ssm_snapshot_[l].mem)
                 clEnqueueCopyBuffer(cl->dev.queue, gpu_ssm_snapshot_[l].mem, gpu_ssm_states[l].mem, 0, 0, 16 * 128 * 128 * sizeof(float), 0, nullptr, nullptr);
             if (gpu_conv_states[l].mem && l < gpu_conv_snapshot_.size() && gpu_conv_snapshot_[l].mem)
                 clEnqueueCopyBuffer(cl->dev.queue, gpu_conv_snapshot_[l].mem, gpu_conv_states[l].mem, 0, 0, (size_t)(3 * total_qkv * sizeof(float)), 0, nullptr, nullptr);
+            if (gpu_k_caches[l].mem && l < gpu_k_snapshot_.size() && gpu_k_snapshot_[l].mem)
+                clEnqueueCopyBuffer(cl->dev.queue, gpu_k_snapshot_[l].mem, gpu_k_caches[l].mem, 0, 0, (size_t)(seq_limit * kv_sz * sizeof(uint16_t)), 0, nullptr, nullptr);
+            if (gpu_v_caches[l].mem && l < gpu_v_snapshot_.size() && gpu_v_snapshot_[l].mem)
+                clEnqueueCopyBuffer(cl->dev.queue, gpu_v_snapshot_[l].mem, gpu_v_caches[l].mem, 0, 0, (size_t)(seq_limit * kv_sz * sizeof(uint16_t)), 0, nullptr, nullptr);
         }
         clFinish(cl->dev.queue);
     }
@@ -166,9 +179,9 @@ void Qwen35DecoderAdapter::reset()
             int64_t hd = (arch.n_head > 0) ? (arch.n_embd / arch.n_head) : 256;
             int64_t kv_sz = arch.n_head_kv * hd;
             if (gpu_k_caches[l].mem)
-                cl->fill(gpu_k_caches[l], 0.0f, seq_limit * kv_sz);
+                cl->fill(gpu_k_caches[l], 0.0f, (seq_limit * kv_sz + 1) / 2);
             if (gpu_v_caches[l].mem)
-                cl->fill(gpu_v_caches[l], 0.0f, seq_limit * kv_sz);
+                cl->fill(gpu_v_caches[l], 0.0f, (seq_limit * kv_sz + 1) / 2);
         }
     }
 }

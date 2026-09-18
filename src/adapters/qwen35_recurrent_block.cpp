@@ -25,14 +25,26 @@ void Qwen35RecurrentBlock::forward(int64_t layer, const ArchitectureSpec &arch, 
     if (w_O == model.tensors.end())
         w_O = model.tensors.find(prefix + "attn_output.weight");
 
-    if (w_qkv != model.tensors.end())
+    std::string fused_name = prefix + "attn_qkv_gate.weight";
+    ClBuffer *fused_w = weights_mgr_->get_tensor_buffer(fused_name);
+    if (fused_w)
     {
-        int64_t act_qkv = w_qkv->second.dims.size() > 1 ? w_qkv->second.dims[1] : total_qkv;
-        weights_mgr_->dispatch_gemv(gpu_conv_in, gpu_hidden, prefix + "attn_qkv.weight", w_qkv->second, act_qkv, n_embd, layer);
+        cl_->gemv_q4_0(gpu_conv_in, gpu_hidden, *fused_w, total_qkv + linear_inner, n_embd);
+        clEnqueueCopyBuffer(cl_->dev.queue, gpu_conv_in.mem, gpu_gate.mem,
+                            (size_t)(total_qkv * sizeof(float)), 0,
+                            (size_t)(linear_inner * sizeof(float)), 0, nullptr, nullptr);
     }
-    if (w_gate != model.tensors.end())
+    else
     {
-        weights_mgr_->dispatch_gemv(gpu_gate, gpu_hidden, prefix + "attn_gate.weight", w_gate->second, linear_inner, n_embd, layer);
+        if (w_qkv != model.tensors.end())
+        {
+            int64_t act_qkv = w_qkv->second.dims.size() > 1 ? w_qkv->second.dims[1] : total_qkv;
+            weights_mgr_->dispatch_gemv(gpu_conv_in, gpu_hidden, prefix + "attn_qkv.weight", w_qkv->second, act_qkv, n_embd, layer);
+        }
+        if (w_gate != model.tensors.end())
+        {
+            weights_mgr_->dispatch_gemv(gpu_gate, gpu_hidden, prefix + "attn_gate.weight", w_gate->second, linear_inner, n_embd, layer);
+        }
     }
     if (w_alpha != model.tensors.end())
     {
@@ -57,7 +69,7 @@ void Qwen35RecurrentBlock::forward(int64_t layer, const ArchitectureSpec &arch, 
     // Fused Recurrent DeltaNet Step + SSM Norm + SiLU Gate + Multiply
     std::string ssm_norm_name = prefix + "ssm_norm.weight";
     ClBuffer *ssm_norm_buf = weights_mgr_->get_tensor_buffer(ssm_norm_name);
-    ClBuffer *attn_gate_buf = (w_gate != model.tensors.end()) ? &gpu_gate : nullptr;
+    ClBuffer *attn_gate_buf = (w_gate != model.tensors.end() || fused_w != nullptr) ? &gpu_gate : nullptr;
     ClBuffer *ssm_a_buf = weights_mgr_->get_tensor_buffer(prefix + "ssm_a");
     ClBuffer *ssm_dt_buf = weights_mgr_->get_tensor_buffer(prefix + "ssm_dt");
 

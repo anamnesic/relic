@@ -24,6 +24,40 @@ inline float fp16_to_fp32(ushort h) {
     return as_float(u);
 }
 
+inline ushort fp32_to_fp16(float f) {
+    uint x = as_uint(f);
+    uint sign = (x >> 16) & 0x8000;
+    int exp = ((x >> 23) & 0xFF) - 127 + 15;
+    uint mant = x & 0x007FFFFF;
+
+    if (exp <= 0) {
+        if (exp < -10) return (ushort)sign;
+        mant = (mant | 0x00800000) >> (1 - exp);
+        return (ushort)(sign | (mant >> 13));
+    } else if (exp >= 31) {
+        return (ushort)(sign | 0x7C00);
+    }
+    return (ushort)(sign | ((uint)exp << 10) | (mant >> 13));
+}
+
+//------------------------------------------------------------------------------
+// In-Kernel KV Quantization Append: FP32 -> FP16 On-The-Fly
+//------------------------------------------------------------------------------
+kernel void kv_cache_append_fp16(
+    global const float *k_in,
+    global const float *v_in,
+    global ushort *k_cache,
+    global ushort *v_cache,
+    int pos,
+    int kv_stride
+) {
+    int i = get_global_id(0);
+    if (i >= kv_stride) return;
+    int offset = pos * kv_stride + i;
+    k_cache[offset] = fp32_to_fp16(k_in[i]);
+    v_cache[offset] = fp32_to_fp16(v_in[i]);
+}
+
 //------------------------------------------------------------------------------
 // GPU Embedding Lookup (128-bit SIMD in VRAM)
 //------------------------------------------------------------------------------
@@ -464,7 +498,9 @@ kernel void gemv_q4_0(
 }
 
 //------------------------------------------------------------------------------
-// FUSED FFN: Multi-Row 8x GEMV (Gate + Up) + SiLU + Mul in 1 Kernel Launch
+//------------------------------------------------------------------------------
+// FUSED FFN: Multi-Row 16x GEMV (Gate + Up) + SiLU + Mul in 1 Kernel Launch
+// 4-Warp (128 threads) Execution with Shared Activation Reuse
 //------------------------------------------------------------------------------
 kernel void gemv_q4_0_ffn_swiglu(
     global const float *a,          // [K = 2048]
@@ -475,12 +511,15 @@ kernel void gemv_q4_0_ffn_swiglu(
     int K,
     local float *l_a
 ) {
-    local float l_gate[8][64];
-    local float l_up[8][64];
+    local float l_gate[2][8][64];
+    local float l_up[2][8][64];
 
-    int base_row = get_group_id(0) * 8;
     int tid = get_local_id(0);
-    int wg_size = get_local_size(0);
+    int wg_size = get_local_size(0); // 128
+    int sub_id = tid / 64;          // [0, 1]
+    int sub_tid = tid % 64;         // [0..63]
+
+    int base_row = get_group_id(0) * 16 + sub_id * 8;
 
     // Dynamically sized shared memory buffer
     for (int i = tid; i < K; i += wg_size) {
@@ -500,7 +539,7 @@ kernel void gemv_q4_0_ffn_swiglu(
     float sum_gate[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
     float sum_up[8]   = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 
-    for (int blk = tid; blk < n_blocks; blk += wg_size) {
+    for (int blk = sub_tid; blk < n_blocks; blk += 64) {
         local const float *a_blk = l_a + blk * 32;
 
         float d_gate[8], d_up[8];
@@ -559,53 +598,53 @@ kernel void gemv_q4_0_ffn_swiglu(
     }
 
     for (int r = 0; r < 8; r++) {
-        l_gate[r][tid] = sum_gate[r];
-        l_up[r][tid]   = sum_up[r];
+        l_gate[sub_id][r][sub_tid] = sum_gate[r];
+        l_up[sub_id][r][sub_tid]   = sum_up[r];
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
-    if (tid < 32) {
+    if (sub_tid < 32) {
         for (int r = 0; r < 8; r++) {
-            l_gate[r][tid] += l_gate[r][tid + 32];
-            l_up[r][tid]   += l_up[r][tid + 32];
+            l_gate[sub_id][r][sub_tid] += l_gate[sub_id][r][sub_tid + 32];
+            l_up[sub_id][r][sub_tid]   += l_up[sub_id][r][sub_tid + 32];
         }
     }
     barrier(CLK_LOCAL_MEM_FENCE);
-    if (tid < 16) {
+    if (sub_tid < 16) {
         for (int r = 0; r < 8; r++) {
-            l_gate[r][tid] += l_gate[r][tid + 16];
-            l_up[r][tid]   += l_up[r][tid + 16];
+            l_gate[sub_id][r][sub_tid] += l_gate[sub_id][r][sub_tid + 16];
+            l_up[sub_id][r][sub_tid]   += l_up[sub_id][r][sub_tid + 16];
         }
     }
     barrier(CLK_LOCAL_MEM_FENCE);
-    if (tid < 8) {
+    if (sub_tid < 8) {
         for (int r = 0; r < 8; r++) {
-            l_gate[r][tid] += l_gate[r][tid + 8];
-            l_up[r][tid]   += l_up[r][tid + 8];
+            l_gate[sub_id][r][sub_tid] += l_gate[sub_id][r][sub_tid + 8];
+            l_up[sub_id][r][sub_tid]   += l_up[sub_id][r][sub_tid + 8];
         }
     }
     barrier(CLK_LOCAL_MEM_FENCE);
-    if (tid < 4) {
+    if (sub_tid < 4) {
         for (int r = 0; r < 8; r++) {
-            l_gate[r][tid] += l_gate[r][tid + 4];
-            l_up[r][tid]   += l_up[r][tid + 4];
+            l_gate[sub_id][r][sub_tid] += l_gate[sub_id][r][sub_tid + 4];
+            l_up[sub_id][r][sub_tid]   += l_up[sub_id][r][sub_tid + 4];
         }
     }
     barrier(CLK_LOCAL_MEM_FENCE);
-    if (tid < 2) {
+    if (sub_tid < 2) {
         for (int r = 0; r < 8; r++) {
-            l_gate[r][tid] += l_gate[r][tid + 2];
-            l_up[r][tid]   += l_up[r][tid + 2];
+            l_gate[sub_id][r][sub_tid] += l_gate[sub_id][r][sub_tid + 2];
+            l_up[sub_id][r][sub_tid]   += l_up[sub_id][r][sub_tid + 2];
         }
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
-    if (tid == 0) {
+    if (sub_tid == 0) {
         for (int r = 0; r < 8; r++) {
             int row = base_row + r;
             if (row < N) {
-                float g = l_gate[r][0] + l_gate[r][1];
-                float u = l_up[r][0] + l_up[r][1];
+                float g = l_gate[sub_id][r][0] + l_gate[sub_id][r][1];
+                float u = l_up[sub_id][r][0] + l_up[sub_id][r][1];
                 float silu_g = g / (1.0f + exp(-g));
                 dst[row] = silu_g * u;
             }
@@ -943,6 +982,81 @@ kernel void qwen_full_attention_step(
         float w = l_scores[s];
         global const float *v_s = v_cache + (size_t)s * kv_stride + h_kv * head_dim;
         acc += w * v_s[d];
+    }
+
+    attn_out[h * head_dim + d] = acc;
+}
+
+//------------------------------------------------------------------------------
+// GPU Causal Full Attention for 1 Token with In-Kernel FP16 KV Cache Dequant
+// Dispatched with: Global = n_head * head_dim, Local = head_dim
+//------------------------------------------------------------------------------
+kernel void qwen_full_attention_step_fp16(
+    global const float *q_buf,        // [n_head * head_dim]
+    global const ushort *k_cache,     // [max_seq * (n_kv_head * head_dim)] (FP16)
+    global const ushort *v_cache,     // [max_seq * (n_kv_head * head_dim)] (FP16)
+    global float *attn_out,           // [n_head * head_dim]
+    int n_head,
+    int n_kv_head,
+    int head_dim,
+    int pos,
+    int max_seq
+) {
+    local float l_scores[512];
+    local float l_dot[256];
+
+    int h = get_group_id(0);
+    int d = get_local_id(0);
+
+    if (h >= n_head || d >= head_dim) return;
+
+    int q_per_kv = n_head / n_kv_head;
+    int h_kv = h / (q_per_kv > 0 ? q_per_kv : 1);
+    int kv_stride = n_kv_head * head_dim;
+
+    int S = pos + 1;
+    float inv_scale = rsqrt((float)head_dim);
+
+    // Compute scores for head h
+    global const float *q_h = q_buf + h * head_dim;
+
+    for (int s = 0; s < S && s < 512; s++) {
+        global const ushort *k_s = k_cache + (size_t)s * kv_stride + h_kv * head_dim;
+        float k_val = fp16_to_fp32(k_s[d]);
+        l_dot[d] = q_h[d] * k_val;
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        for (int step = head_dim / 2; step > 0; step >>= 1) {
+            if (d < step) l_dot[d] += l_dot[d + step];
+            barrier(CLK_LOCAL_MEM_FENCE);
+        }
+        if (d == 0) {
+            l_scores[s] = l_dot[0] * inv_scale;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    // Softmax over l_scores[0..S-1]
+    if (d == 0) {
+        float maxv = l_scores[0];
+        for (int s = 1; s < S && s < 512; s++) if (l_scores[s] > maxv) maxv = l_scores[s];
+        float sum = 0.0f;
+        for (int s = 0; s < S && s < 512; s++) {
+            l_scores[s] = exp(l_scores[s] - maxv);
+            sum += l_scores[s];
+        }
+        float inv_sum = 1.0f / (sum > 0.0f ? sum : 1.0f);
+        for (int s = 0; s < S && s < 512; s++) l_scores[s] *= inv_sum;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    // Weighted sum of V
+    float acc = 0.0f;
+    for (int s = 0; s < S && s < 512; s++) {
+        float w = l_scores[s];
+        global const ushort *v_s = v_cache + (size_t)s * kv_stride + h_kv * head_dim;
+        float v_val = fp16_to_fp32(v_s[d]);
+        acc += w * v_val;
     }
 
     attn_out[h * head_dim + d] = acc;

@@ -53,15 +53,12 @@ void Qwen35AttentionBlock::forward(int64_t layer, int64_t position, int64_t seq_
     cl_->rope(gpu_q, q_size, n_head, position, 1, arch.rope_freq_base, arch.rope_dimension_count);
     cl_->rope(gpu_k, kv_size, n_kv_head, position, 1, arch.rope_freq_base, arch.rope_dimension_count);
 
-    // Copy K and V to cache at position
-    size_t kv_bytes = (size_t)(kv_size * sizeof(float));
-    size_t kv_offset = (size_t)(position * kv_bytes);
-    clEnqueueCopyBuffer(cl_->dev.queue, gpu_k.mem, gpu_k_cache.mem, 0, kv_offset, kv_bytes, 0, nullptr, nullptr);
-    clEnqueueCopyBuffer(cl_->dev.queue, gpu_v.mem, gpu_v_cache.mem, 0, kv_offset, kv_bytes, 0, nullptr, nullptr);
+    // Append K and V to cache at position with In-Kernel FP16 Quantization
+    cl_->kv_cache_append_fp16(gpu_k_cache, gpu_v_cache, gpu_k, gpu_v, position, kv_size);
 
-    // Pure GPU Causal Full Attention
-    cl_->qwen_attention_step(gpu_q, gpu_k_cache, gpu_v_cache,
-                            gpu_attn_out, n_head, n_kv_head, head_dim, position, seq_limit);
+    // Pure GPU Causal Full Attention with In-Kernel FP16 KV Cache Dequantization
+    cl_->qwen_attention_step_fp16(gpu_q, gpu_k_cache, gpu_v_cache,
+                                 gpu_attn_out, n_head, n_kv_head, head_dim, position, seq_limit);
 
     // Sigmoid Attention Gate Multiply: attn_out = attn_out * sigmoid(gate)
     cl_->qwen_attn_gate_mul(gpu_attn_out, gpu_attn_gate, q_size);
