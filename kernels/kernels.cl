@@ -41,13 +41,25 @@ inline ushort fp32_to_fp16(float f) {
 }
 
 //------------------------------------------------------------------------------
+// FluxBin: Flexible LUT-based Ultra-low-bit LLM Inference (arXiv:2608.15602)
+// Register/Local Memory LUT Dequantization for Q2_K / Q3_K
+//------------------------------------------------------------------------------
+inline float fluxbin_lut_q2(uchar q, local const float *lut) {
+    return lut[q & 0x03];
+}
+
+inline float fluxbin_lut_q3(uchar q, local const float *lut) {
+    return lut[q & 0x07];
+}
+
+//------------------------------------------------------------------------------
 // In-Kernel KV Quantization Append: FP32 -> FP16 On-The-Fly
 //------------------------------------------------------------------------------
 kernel void kv_cache_append_fp16(
-    global const float *k_in,
-    global const float *v_in,
     global ushort *k_cache,
     global ushort *v_cache,
+    global const float *k_in,
+    global const float *v_in,
     int pos,
     int kv_stride
 ) {
@@ -56,6 +68,60 @@ kernel void kv_cache_append_fp16(
     int offset = pos * kv_stride + i;
     k_cache[offset] = fp32_to_fp16(k_in[i]);
     v_cache[offset] = fp32_to_fp16(v_in[i]);
+}
+
+//------------------------------------------------------------------------------
+// SAW-INT4: System-Aware 4-Bit KV-Cache Quantization Append (arXiv:2604.19157)
+// Compresses 32-element blocks: 2 bytes FP16 scale + 16 bytes 4-bit quants (75% savings)
+//------------------------------------------------------------------------------
+kernel void kv_cache_append_q4(
+    global uchar *k_cache,
+    global uchar *v_cache,
+    global const float *k_in,
+    global const float *v_in,
+    int pos,
+    int kv_stride
+) {
+    int blk = get_global_id(0);
+    int n_blocks = kv_stride / 32;
+    if (blk >= n_blocks) return;
+
+    int in_offset = blk * 32;
+    int block_byte_offset = pos * (n_blocks * 18) + blk * 18;
+
+    // Quantize K block
+    float k_amax = 0.0f;
+    for (int j = 0; j < 32; j++) {
+        float val = fabs(k_in[in_offset + j]);
+        if (val > k_amax) k_amax = val;
+    }
+    float k_d = k_amax / 7.0f;
+    float k_id = (k_d > 0.0f) ? (1.0f / k_d) : 0.0f;
+    ushort k_d_bits = fp32_to_fp16(k_d);
+    k_cache[block_byte_offset + 0] = (uchar)(k_d_bits & 0xFF);
+    k_cache[block_byte_offset + 1] = (uchar)(k_d_bits >> 8);
+    for (int j = 0; j < 16; j++) {
+        int v0 = clamp((int)round(k_in[in_offset + j] * k_id) + 8, 0, 15);
+        int v1 = clamp((int)round(k_in[in_offset + j + 16] * k_id) + 8, 0, 15);
+        k_cache[block_byte_offset + 2 + j] = (uchar)(v0 | (v1 << 4));
+    }
+
+    // Quantize V block
+    float v_amax = 0.0f;
+    for (int j = 0; j < 32; j++) {
+        float val = fabs(v_in[in_offset + j]);
+        if (val > v_amax) v_amax = val;
+    }
+    float v_d = v_amax / 7.0f;
+    float v_id = (v_d > 0.0f) ? (1.0f / v_d) : 0.0f;
+    ushort v_d_bits = fp32_to_fp16(v_d);
+    v_cache[block_byte_offset + 0] = (uchar)(v_d_bits & 0xFF);
+    v_cache[block_byte_offset + 1] = (uchar)(v_d_bits >> 8);
+    for (int j = 0; j < 16; j++) {
+        int v0 = clamp((int)round(v_in[in_offset + j] * v_id) + 8, 0, 15);
+        int v1 = clamp((int)round(v_in[in_offset + j + 16] * v_id) + 8, 0, 15);
+        v_cache[block_byte_offset + 2 + j] = (uchar)(v0 | (v1 << 4));
+    }
 }
 
 //------------------------------------------------------------------------------
@@ -336,6 +402,91 @@ kernel void gemv_q8_0(
 }
 
 //------------------------------------------------------------------------------
+// Native GEMV Q4_K for GGUF k-quants (144 bytes per 256 weights)
+//------------------------------------------------------------------------------
+kernel void gemv_q4_k(
+    global const float *a,          // [K]
+    global const uchar *b,          // [N * (K / 256 * 144)]
+    global float *dst,              // [N]
+    int N,
+    int K
+) {
+    int row = get_global_id(0);
+    if (row >= N) return;
+
+    int n_super_blocks = K / 256;
+    global const uchar *b_row = b + (size_t)row * n_super_blocks * 144;
+
+    float acc = 0.0f;
+    for (int sb = 0; sb < n_super_blocks; sb++) {
+        global const uchar *b_sb = b_row + sb * 144;
+        ushort d_raw = (ushort)b_sb[0] | ((ushort)b_sb[1] << 8);
+        ushort dmin_raw = (ushort)b_sb[2] | ((ushort)b_sb[3] << 8);
+        float d = fp16_to_fp32(d_raw);
+        float dmin = fp16_to_fp32(dmin_raw);
+
+        global const uchar *qs = b_sb + 16;
+        global const float *a_ptr = a + sb * 256;
+
+        for (int i = 0; i < 128; i++) {
+            uchar q = qs[i];
+            int q0 = q & 0x0F;
+            int q1 = q >> 4;
+            acc += a_ptr[i] * ((float)q0 * d - dmin);
+            acc += a_ptr[i + 128] * ((float)q1 * d - dmin);
+        }
+    }
+    dst[row] = acc;
+}
+
+//------------------------------------------------------------------------------
+// Native GEMV Q6_K for GGUF k-quants (210 bytes per 256 weights)
+//------------------------------------------------------------------------------
+kernel void gemv_q6_k(
+    global const float *a,          // [K]
+    global const uchar *b,          // [N * (K / 256 * 210)]
+    global float *dst,              // [N]
+    int N,
+    int K
+) {
+    int row = get_global_id(0);
+    if (row >= N) return;
+
+    int n_super_blocks = K / 256;
+    global const uchar *b_row = b + (size_t)row * n_super_blocks * 210;
+
+    float acc = 0.0f;
+    for (int sb = 0; sb < n_super_blocks; sb++) {
+        global const uchar *b_sb = b_row + sb * 210;
+        global const uchar *ql = b_sb;
+        global const uchar *qh = b_sb + 128;
+        global const char *scales = (global const char *)(b_sb + 192);
+        ushort d_raw = (ushort)b_sb[208] | ((ushort)b_sb[209] << 8);
+        float d = fp16_to_fp32(d_raw);
+
+        global const float *a_ptr = a + sb * 256;
+
+        for (int i = 0; i < 128; i++) {
+            int ql0 = ql[i] & 0x0F;
+            int ql1 = ql[i] >> 4;
+            int qh_byte = qh[i / 2];
+            int qh0 = (i % 2 == 0) ? (qh_byte & 0x03) : ((qh_byte >> 2) & 0x03);
+            int qh1 = (i % 2 == 0) ? ((qh_byte >> 4) & 0x03) : ((qh_byte >> 6) & 0x03);
+
+            int q0 = (ql0 | (qh0 << 4)) - 32;
+            int q1 = (ql1 | (qh1 << 4)) - 32;
+
+            float sc0 = (float)scales[i / 8];
+            float sc1 = (float)scales[(i + 128) / 8];
+
+            acc += a_ptr[i] * (d * sc0 * (float)q0);
+            acc += a_ptr[i + 128] * (d * sc1 * (float)q1);
+        }
+    }
+    dst[row] = acc;
+}
+
+//------------------------------------------------------------------------------
 //------------------------------------------------------------------------------
 // MULTI-ROW 16x GEMV Q4_0: 4-Warp Tiled Execution with Dynamic Local Activation Cache
 //------------------------------------------------------------------------------
@@ -495,6 +646,48 @@ kernel void gemv_q4_0(
         if (row2 < N) dst[row2] = l_sum2[warp_id][0] + l_sum2[warp_id][1];
         if (row3 < N) dst[row3] = l_sum3[warp_id][0] + l_sum3[warp_id][1];
     }
+}
+
+//------------------------------------------------------------------------------
+// Batched Prefill GEMM Q4_0: Multi-Token Prompt Evaluation (M x N x K)
+// Computes C[M, N] = A[M, K] * B[N, K]^T in parallel
+// Dispatched with: Global = [ (N + 15) / 16 * 16, (M + 3) / 4 * 4 ], Local = [ 16, 4 ]
+//------------------------------------------------------------------------------
+kernel void gemm_q4_0(
+    global const float *A,          // [M, K]
+    global const uchar *B,          // [N, K / 32 * 18] (Q4_0 weight matrix)
+    global float *C,                // [M, N]
+    int M,
+    int N,
+    int K
+) {
+    int col = get_global_id(0); // Output row in B / col in C [0 .. N-1]
+    int row = get_global_id(1); // Token index in A / row in C [0 .. M-1]
+
+    if (row >= M || col >= N) return;
+
+    int n_blocks = K / 32;
+    global const uchar *b_row = B + (size_t)col * n_blocks * 18;
+    global const float *a_row = A + (size_t)row * K;
+
+    float acc = 0.0f;
+    for (int blk = 0; blk < n_blocks; blk++) {
+        global const uchar *b_blk = b_row + blk * 18;
+        ushort d_bits = (ushort)b_blk[0] | ((ushort)b_blk[1] << 8);
+        float d = fp16_to_fp32(d_bits);
+        global const uchar *qs = b_blk + 2;
+        global const float *a_ptr = a_row + blk * 32;
+
+        float block_acc = 0.0f;
+        for (int i = 0; i < 16; i++) {
+            uchar byte_val = qs[i];
+            int v0 = (int)(byte_val & 0x0F) - 8;
+            int v1 = (int)(byte_val >> 4) - 8;
+            block_acc += a_ptr[i] * (float)v0 + a_ptr[i + 16] * (float)v1;
+        }
+        acc += block_acc * d;
+    }
+    C[(size_t)row * N + col] = acc;
 }
 
 //------------------------------------------------------------------------------
@@ -1056,6 +1249,96 @@ kernel void qwen_full_attention_step_fp16(
         float w = l_scores[s];
         global const ushort *v_s = v_cache + (size_t)s * kv_stride + h_kv * head_dim;
         float v_val = fp16_to_fp32(v_s[d]);
+        acc += w * v_val;
+    }
+
+    attn_out[h * head_dim + d] = acc;
+}
+
+//------------------------------------------------------------------------------
+// SAW-INT4 GPU Causal Full Attention for 1 Token with In-Kernel 4-bit KV Dequant
+// Dispatched with: Global = n_head * head_dim, Local = head_dim
+//------------------------------------------------------------------------------
+kernel void qwen_full_attention_step_q4(
+    global const float *q_buf,        // [n_head * head_dim]
+    global const uchar *k_cache,      // [max_seq * (n_kv_head * head_dim / 32 * 18)] (INT4)
+    global const uchar *v_cache,      // [max_seq * (n_kv_head * head_dim / 32 * 18)] (INT4)
+    global float *attn_out,           // [n_head * head_dim]
+    int n_head,
+    int n_kv_head,
+    int head_dim,
+    int pos,
+    int max_seq
+) {
+    local float l_scores[512];
+    local float l_dot[256];
+
+    int h = get_group_id(0);
+    int d = get_local_id(0);
+
+    if (h >= n_head || d >= head_dim) return;
+
+    int q_per_kv = n_head / n_kv_head;
+    int h_kv = h / (q_per_kv > 0 ? q_per_kv : 1);
+    int kv_stride = n_kv_head * head_dim;
+    int bytes_per_token = (kv_stride / 32) * 18;
+
+    int elem_idx = h_kv * head_dim + d;
+    int blk_idx = elem_idx / 32;
+    int in_blk = elem_idx % 32;
+    int block_byte_in_token = blk_idx * 18;
+
+    int S = pos + 1;
+    float inv_scale = rsqrt((float)head_dim);
+
+    // Compute scores for head h
+    global const float *q_h = q_buf + h * head_dim;
+
+    for (int s = 0; s < S && s < 512; s++) {
+        int token_offset = s * bytes_per_token + block_byte_in_token;
+        ushort k_d_raw = (ushort)k_cache[token_offset] | ((ushort)k_cache[token_offset + 1] << 8);
+        float k_scale = fp16_to_fp32(k_d_raw);
+        uchar k_byte = k_cache[token_offset + 2 + (in_blk % 16)];
+        int k_q = (in_blk < 16) ? (k_byte & 0x0F) : (k_byte >> 4);
+        float k_val = (float)(k_q - 8) * k_scale;
+
+        l_dot[d] = q_h[d] * k_val;
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        for (int step = head_dim / 2; step > 0; step >>= 1) {
+            if (d < step) l_dot[d] += l_dot[d + step];
+            barrier(CLK_LOCAL_MEM_FENCE);
+        }
+        if (d == 0) {
+            l_scores[s] = l_dot[0] * inv_scale;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    // Softmax over l_scores[0..S-1]
+    if (d == 0) {
+        float maxv = l_scores[0];
+        for (int s = 1; s < S && s < 512; s++) if (l_scores[s] > maxv) maxv = l_scores[s];
+        float sum = 0.0f;
+        for (int s = 0; s < S && s < 512; s++) {
+            l_scores[s] = exp(l_scores[s] - maxv);
+            sum += l_scores[s];
+        }
+        float inv_sum = 1.0f / (sum > 0.0f ? sum : 1.0f);
+        for (int s = 0; s < S && s < 512; s++) l_scores[s] *= inv_sum;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    // Weighted sum of V
+    float acc = 0.0f;
+    for (int s = 0; s < S && s < 512; s++) {
+        float w = l_scores[s];
+        int token_offset = s * bytes_per_token + block_byte_in_token;
+        ushort v_d_raw = (ushort)v_cache[token_offset] | ((ushort)v_cache[token_offset + 1] << 8);
+        float v_scale = fp16_to_fp32(v_d_raw);
+        uchar v_byte = v_cache[token_offset + 2 + (in_blk % 16)];
+        int v_q = (in_blk < 16) ? (v_byte & 0x0F) : (v_byte >> 4);
+        float v_val = (float)(v_q - 8) * v_scale;
         acc += w * v_val;
     }
 

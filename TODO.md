@@ -67,75 +67,6 @@
 - [x] **Sub-Layer Tensor Placement Decisions**:
   - [x] Pin critical Attention Q/K/V/Out matrices in VRAM.
   - [x] Offload bulky FFN weights to Host RAM with async prefetching when model exceeds VRAM budget (>4GB models on 4GB GPUs).
-# RELIC Roadmap & Master TODO
-
-> **Relic: Maximize LLM inference under a fixed memory budget.**
-
----
-
-## 🎯 Architecture Blueprint Overview
-
-```text
-                    ┌────────────────────────────┐
-                    │         relic CLI          │
-                    │ run / bench / profile      │
-                    └─────────────┬──────────────┘
-                                  │
-                    ┌─────────────▼──────────────┐
-                    │       Model Runtime        │
-                    │ GGUF / tokenizer / sampler │
-                    │ transformer / generation   │
-                    └─────────────┬──────────────┘
-                                  │
-              ┌───────────────────▼───────────────────┐
-              │          Adaptive Planner             │
-              │                                       │
-              │ model profile + hardware profile      │
-              │ memory budget + execution costs       │
-              │ tensor placement + migration          │
-              └───────┬───────────┬───────────┬───────┘
-                      │           │           │
-            ┌─────────▼───┐ ┌────▼─────┐ ┌───▼─────────┐
-            │Memory Engine│ │Scheduler │ │KV Manager   │
-            └──────┬──────┘ └────┬─────┘ └────┬────────┘
-                   │             │            │
-        ┌──────────▼─────────────▼────────────▼──────────┐
-        │                Backend API                     │
-        └───────┬────────────┬────────────┬───────────────┘
-                │            │            │
-         NVIDIA (Warp32)   Intel UHD     CPU (AVX2)
-```
-
----
-
-## 📋 Implementation Checklist
-
-### 🏁 Phase 1: Decoupled Core & Abstract Backend API
-- [x] **ADR 0003**: Formalize Modular Heterogeneous Runtime Architecture (`docs/adr/0003-modular-heterogeneous-runtime-architecture.md`).
-- [x] **Backend Abstraction Interface** (`src/backends/backend.h`):
-  - [x] `BackendBuffer` memory handles (Device VRAM, Host Pinned, Shared iGPU).
-  - [x] Abstract compute primitives (`gemv_q4_0`, `gemv_q8_0`, `fused_ffn`, `rms_norm`, `rope`, `attention`, `deltanet`, `argmax`, `embed_lookup`).
-  - [x] Device telemetry & statistics (`DeviceStats`).
-- [x] **Hardware Profiler** (`src/planner/hardware_profile.h` / `src/planner/hardware_profile.cpp`):
-  - [x] Measure VRAM capacity, PCIe DMA transfer rate (GB/s), and compute units per device.
-  - [x] CLI command `relic --profile` outputting `devices.json`.
-- [x] **Adaptive Planner Core** (`src/planner/adaptive_planner.h` / `src/planner/adaptive_planner.cpp`):
-  - [x] Read Model Spec + Hardware Profile + Memory Budget.
-  - [x] Compute per-tensor placement decisions (`ExecutionPlan`).
-- [x] **Memory Engine Foundation** (`src/memory/memory_engine.h` / `src/memory/memory_engine.cpp`):
-  - [x] Memory Tier allocation and tensor residency mapping.
-- [x] **Adaptive KV Cache Manager** (`src/kv/kv_manager.h` / `src/kv/kv_manager.cpp`):
-  - [x] Dynamic multi-layer KV cache allocation with FP16, Q8_0, and Q4_0 support.
-
----
-
-### ⚡ Phase 2: Sub-Layer Offload & Async Prefetch Pipeline
-- [x] **Memory Engine Advanced Pools** (`src/memory/`):
-  - [x] `PinnedHostPool`: 64-byte aligned virtual memory allocator for PCIe DMA bursts.
-  - [x] `AsyncPrefetcher`: Dual-slot VRAM staging buffers with non-blocking DMA queue (`compute(N) + copy(N+1)`).
-- [x] **Sub-Layer Tensor Placement Decisions**:
-  - [x] Pin critical Attention Q/K/V/Out matrices in VRAM.
-  - [x] Offload bulky FFN weights to Host RAM with async prefetching when model exceeds VRAM budget (>4GB models on 4GB GPUs).
 - [x] **Adaptive KV Cache Manager Compression**:
   - [x] Pressure-aware dynamic KV quantization (FP16 $\to$ Q8 $\to$ Q4) under low VRAM conditions.
   - [x] Context budget and token eviction policies for ultra-long contexts.
@@ -178,7 +109,8 @@
 - [x] **7. In-Kernel KV Quantization & LUT Ultra-Low-Bit** (*SAW-INT4 & FluxBin*):
   - [x] In-kernel FP16 KV cache append (`kv_cache_append_fp16`): Store half-precision K and V on-the-fly, halving cache VRAM footprint and memory bandwidth during attention.
   - [x] Quantized causal attention step (`qwen_full_attention_step_fp16`): On-the-fly dequantization in registers during dot-product attention.
-  - [ ] Experimental LUT-based Q2/Q3 backend for 1GB VRAM hardware.
+  - [x] In-kernel SAW-INT4 KV Cache (`kv_cache_append_q4` / `qwen_full_attention_step_q4`) for 75% VRAM saving.
+  - [x] FluxBin LUT-based ultra-low-bit Q2/Q3 dequantization helpers in OpenCL C 1.2.
 
 ---
 
@@ -233,6 +165,14 @@
   - [x] Eliminate 18 sequential GEMV dispatches and redundant activation loads from global memory per token.
 - [x] **8. Multi-Row 16x Tiling in FFN SwiGLU (`gemv_q4_0_ffn_swiglu`)**:
   - [x] Scale workgroup size to 128 threads processing 16 rows per block, reducing FFN workgroups from 768 to 384.
+- [x] **9. Batched Prefill GEMM Q4_0 (`gemm_q4_0`)**:
+  - [x] 2D-tiled matrix multiplication ($M \times N \times K$) in OpenCL for prompt evaluation chunks, eliminating token-by-token prefill latency.
+- [x] **10. Active Speculative Decoding Pipeline in `InferenceEngine`**:
+  - [x] Integrate n-gram / draft model speculative step in autoregressive loop with parallel target model batched verification.
+- [x] **11. Native K-Quants GEMV (`Q4_K` and `Q6_K`)**:
+  - [x] Add OpenCL kernels for direct execution of GGUF k-quants without repacking.
+- [x] **12. OpenAI-Compatible SSE Streaming Daemon (`/v1/chat/completions`)**:
+  - [x] Implement Server-Sent Events HTTP streaming in `ServerCommand` for drop-in LLM client integration.
 
 ---
 

@@ -193,10 +193,22 @@ bool run_relic_server(InferenceEngine &engine, int port, int default_max_tokens,
 
         std::string req(buffer, bytes_read);
 
+        if (req.find("OPTIONS ") == 0)
+        {
+            std::string resp = "HTTP/1.1 204 No Content\r\n"
+                               "Access-Control-Allow-Origin: *\r\n"
+                               "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+                               "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+                               "Connection: close\r\n\r\n";
+            safe_write_str(client_fd, resp);
+            close(client_fd);
+            continue;
+        }
+
         if (req.find("GET /health") != std::string::npos)
         {
             std::string body = "{\"status\": \"ok\", \"vram_resident\": true, \"engine\": \"relic\"}\n";
-            std::string resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
+            std::string resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: " +
                                std::to_string(body.length()) + "\r\nConnection: close\r\n\r\n" + body;
             safe_write_str(client_fd, resp);
             close(client_fd);
@@ -207,7 +219,7 @@ bool run_relic_server(InferenceEngine &engine, int port, int default_max_tokens,
         {
             engine.free_buffers();
             std::string body = "{\"status\": \"reset_complete\"}\n";
-            std::string resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
+            std::string resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: " +
                                std::to_string(body.length()) + "\r\nConnection: close\r\n\r\n" + body;
             safe_write_str(client_fd, resp);
             close(client_fd);
@@ -222,11 +234,37 @@ bool run_relic_server(InferenceEngine &engine, int port, int default_max_tokens,
 
         size_t body_pos = req.find("\r\n\r\n");
         std::string body = (body_pos != std::string::npos) ? req.substr(body_pos + 4) : req;
+        bool is_chat = (req.find("/v1/chat/completions") != std::string::npos || req.find("/chat/completions") != std::string::npos);
+        bool is_stream = (body.find("\"stream\": true") != std::string::npos || body.find("\"stream\":true") != std::string::npos);
 
         if (body.find("{") != std::string::npos)
         {
-            prompt = extract_json_field(body, "prompt");
-            std::string tok_str = extract_json_field(body, "n_tokens");
+            if (is_chat)
+            {
+                std::string chat_prompt;
+                size_t msg_pos = 0;
+                while ((msg_pos = body.find("\"role\"", msg_pos)) != std::string::npos)
+                {
+                    std::string role = extract_json_field(body.substr(msg_pos), "role");
+                    std::string content = extract_json_field(body.substr(msg_pos), "content");
+                    if (!content.empty())
+                    {
+                        chat_prompt += "<|im_start|>" + (role.empty() ? "user" : role) + "\n" + content + "<|im_end|>\n";
+                    }
+                    msg_pos += 6;
+                }
+                if (!chat_prompt.empty())
+                {
+                    chat_prompt += "<|im_start|>assistant\n";
+                    prompt = chat_prompt;
+                }
+            }
+
+            if (prompt.empty())
+                prompt = extract_json_field(body, "prompt");
+
+            std::string tok_str = extract_json_field(body, "max_tokens");
+            if (tok_str.empty()) tok_str = extract_json_field(body, "n_tokens");
             if (!tok_str.empty())
                 n_tokens = atoi(tok_str.c_str());
             std::string temp_str = extract_json_field(body, "temperature");
@@ -247,16 +285,76 @@ bool run_relic_server(InferenceEngine &engine, int port, int default_max_tokens,
         if (prompt.empty())
             prompt = "The capital of France is";
 
-        fprintf(stdout, "[Server Request] Prompt: \"%s\" (tokens: %d, temp: %.2f)\n", prompt.c_str(), n_tokens, temp);
+        fprintf(stdout, "[Server Request] Prompt: \"%s\" (tokens: %d, temp: %.2f, stream: %s)\n",
+                prompt.c_str(), n_tokens, temp, is_stream ? "true" : "false");
         fflush(stdout);
+
+        if (is_stream)
+        {
+            std::string sse_hdr = "HTTP/1.1 200 OK\r\n"
+                                  "Content-Type: text/event-stream\r\n"
+                                  "Cache-Control: no-cache\r\n"
+                                  "Connection: close\r\n"
+                                  "Access-Control-Allow-Origin: *\r\n\r\n";
+            safe_write_str(client_fd, sse_hdr);
+
+            auto stream_callback = [client_fd](const std::string &chunk) {
+                std::string escaped;
+                for (char c : chunk) {
+                    if (c == '\"') escaped += "\\\"";
+                    else if (c == '\\') escaped += "\\\\";
+                    else if (c == '\n') escaped += "\\n";
+                    else if (c == '\r') escaped += "\\r";
+                    else if (c == '\t') escaped += "\\t";
+                    else escaped += c;
+                }
+                std::string data = "data: {\"id\":\"chatcmpl-relic\",\"object\":\"chat.completion.chunk\","
+                                   "\"choices\":[{\"delta\":{\"content\":\"" + escaped + "\"},\"index\":0,\"finish_reason\":null}]}\n\n";
+                safe_write_str(client_fd, data);
+            };
+
+            engine.generate(prompt, n_tokens, temp, top_k, stream_callback);
+            engine.free_buffers();
+
+            std::string done = "data: {\"id\":\"chatcmpl-relic\",\"object\":\"chat.completion.chunk\","
+                               "\"choices\":[{\"delta\":{},\"index\":0,\"finish_reason\":\"stop\"}]}\n\n"
+                               "data: [DONE]\n\n";
+            safe_write_str(client_fd, done);
+            close(client_fd);
+            continue;
+        }
 
         std::string generated = engine.generate(prompt, n_tokens, temp, top_k);
         engine.free_buffers();
 
-        std::string resp_header = "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: " +
-                                  std::to_string(generated.length()) + "\r\nConnection: close\r\n\r\n";
-        safe_write_str(client_fd, resp_header);
-        safe_write_str(client_fd, generated);
+        if (is_chat)
+        {
+            std::string escaped;
+            for (char c : generated) {
+                if (c == '\"') escaped += "\\\"";
+                else if (c == '\\') escaped += "\\\\";
+                else if (c == '\n') escaped += "\\n";
+                else if (c == '\r') escaped += "\\r";
+                else if (c == '\t') escaped += "\\t";
+                else escaped += c;
+            }
+            std::string resp_json = "{\"id\":\"chatcmpl-relic\",\"object\":\"chat.completion\",\"created\":1726675200,"
+                                    "\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"" + escaped + "\"},"
+                                    "\"finish_reason\":\"stop\"}]}\n";
+            std::string resp_header = "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n"
+                                      "Access-Control-Allow-Origin: *\r\nContent-Length: " +
+                                      std::to_string(resp_json.length()) + "\r\nConnection: close\r\n\r\n";
+            safe_write_str(client_fd, resp_header);
+            safe_write_str(client_fd, resp_json);
+        }
+        else
+        {
+            std::string resp_header = "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n"
+                                      "Access-Control-Allow-Origin: *\r\nContent-Length: " +
+                                      std::to_string(generated.length()) + "\r\nConnection: close\r\n\r\n";
+            safe_write_str(client_fd, resp_header);
+            safe_write_str(client_fd, generated);
+        }
         close(client_fd);
     }
 

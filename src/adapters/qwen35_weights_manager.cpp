@@ -204,6 +204,16 @@ void Qwen35WeightsManager::dispatch_gemv(ClBuffer &dst, ClBuffer &in, const std:
             cl_->gemv_q8_0(dst, in, *w_buf, N, K);
             return;
         }
+        else if (actual_type == GgmlType::Q4_K)
+        {
+            cl_->gemv_q4_k(dst, in, *w_buf, N, K);
+            return;
+        }
+        else if (actual_type == GgmlType::Q6_K)
+        {
+            cl_->gemv_q6_k(dst, in, *w_buf, N, K);
+            return;
+        }
         else if (actual_type == GgmlType::F32)
         {
             cl_->gemv_f32_nt(dst, in, *w_buf, N, K);

@@ -100,7 +100,8 @@ std::vector<int> InferenceEngine::find_prompt_lookup_draft(const std::vector<int
 }
 
 std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
-                                      float temperature, int top_k)
+                                      float temperature, int top_k,
+                                      std::function<void(const std::string &)> on_token)
 {
     if (!tokenizer || !model || !decoder)
         return "";
@@ -173,6 +174,10 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
         output += piece;
         fprintf(stdout, "%s", piece.c_str());
         fflush(stdout);
+        if (on_token)
+        {
+            on_token(piece);
+        }
         all_tokens.push_back(last_token);
         generated_count++;
 
@@ -190,7 +195,8 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
             if (!drafts.empty())
             {
                 // Step 1: Pre-draft logits (produced by forward(last_token)) verify draft 0
-                int target_d0 = Sampler::sample(logits.data(), (size_t)model->n_vocab, temperature, top_k, 0.9f);
+                int target_d0 = dev_sample ? decoder->sample_token(temperature, top_k, 0.9f)
+                                           : Sampler::sample(logits.data(), (size_t)model->n_vocab, temperature, top_k, 0.9f);
                 if (target_d0 == drafts[0])
                 {
                     size_t num_draft = drafts.size();
@@ -236,6 +242,10 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
                             output += draft_piece;
                             fprintf(stdout, "%s", draft_piece.c_str());
                             fflush(stdout);
+                            if (on_token)
+                            {
+                                on_token(draft_piece);
+                            }
                             all_tokens.push_back(drafts[i]);
                             generated_count++;
                             float *last_acc_logits = batched_logits.data() + (size_t)i * (size_t)model->n_vocab;

@@ -138,6 +138,72 @@ namespace relic::quant
             }
             break;
         }
+        case GgmlType::Q4_K:
+        {
+            size_t bytes_per_row = (size_t)((row_size + 255) / 256) * 144;
+            for (int64_t r = 0; r < num_rows; r++)
+            {
+                const uint8_t *src_row = data + (start_row + r) * bytes_per_row;
+                int64_t n_super_blocks = row_size / 256;
+                float *out_row = out + r * row_size;
+                for (int64_t sb = 0; sb < n_super_blocks; sb++)
+                {
+                    const uint8_t *b_sb = src_row + sb * 144;
+                    uint16_t d_raw = *(const uint16_t *)b_sb;
+                    uint16_t dmin_raw = *(const uint16_t *)(b_sb + 2);
+                    float d = half_bits_to_float(d_raw);
+                    float dmin = half_bits_to_float(dmin_raw);
+                    const uint8_t *qs = b_sb + 16;
+                    for (int64_t i = 0; i < 128; i++)
+                    {
+                        uint8_t q = qs[i];
+                        int q0 = q & 0x0F;
+                        int q1 = q >> 4;
+                        out_row[sb * 256 + i] = (float)q0 * d - dmin;
+                        out_row[sb * 256 + i + 128] = (float)q1 * d - dmin;
+                    }
+                }
+            }
+            break;
+        }
+        case GgmlType::Q6_K:
+        {
+            size_t bytes_per_row = (size_t)((row_size + 255) / 256) * 210;
+            for (int64_t r = 0; r < num_rows; r++)
+            {
+                const uint8_t *src_row = data + (start_row + r) * bytes_per_row;
+                int64_t n_super_blocks = row_size / 256;
+                float *out_row = out + r * row_size;
+                for (int64_t sb = 0; sb < n_super_blocks; sb++)
+                {
+                    const uint8_t *b_sb = src_row + sb * 210;
+                    const uint8_t *ql = b_sb;
+                    const uint8_t *qh = b_sb + 128;
+                    const int8_t *scales = (const int8_t *)(b_sb + 192);
+                    uint16_t d_raw = *(const uint16_t *)(b_sb + 208);
+                    float d = half_bits_to_float(d_raw);
+
+                    for (int64_t i = 0; i < 128; i++)
+                    {
+                        int ql0 = ql[i] & 0x0F;
+                        int ql1 = ql[i] >> 4;
+                        uint8_t qh_byte = qh[i / 2];
+                        int qh0 = (i % 2 == 0) ? (qh_byte & 0x03) : ((qh_byte >> 2) & 0x03);
+                        int qh1 = (i % 2 == 0) ? ((qh_byte >> 4) & 0x03) : ((qh_byte >> 6) & 0x03);
+
+                        int q0 = (ql0 | (qh0 << 4)) - 32;
+                        int q1 = (ql1 | (qh1 << 4)) - 32;
+
+                        float sc0 = (float)scales[i / 8];
+                        float sc1 = (float)scales[(i + 128) / 8];
+
+                        out_row[sb * 256 + i] = d * sc0 * (float)q0;
+                        out_row[sb * 256 + i + 128] = d * sc1 * (float)q1;
+                    }
+                }
+            }
+            break;
+        }
         default:
             fprintf(stderr, "Unsupported type for row dequantization: %d\n", (int)type);
             memset(out, 0, (size_t)(num_rows * row_size * sizeof(float)));

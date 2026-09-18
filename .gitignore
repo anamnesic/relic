@@ -58,3 +58,6 @@ Thumbs.db
 # Models and large binaries
 models/
 *.gguf
+
+# Reference repositories
+references/

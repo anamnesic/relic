@@ -868,6 +868,103 @@ void OpenClBackend::qwen_attention_step_fp16(ClBuffer &q_buf, ClBuffer &k_cache,
     CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr), "qwen_full_attention_step_fp16");
 }
 
+void OpenClBackend::kv_cache_append_q4(ClBuffer &k_cache, ClBuffer &v_cache, ClBuffer &k_in, ClBuffer &v_in, int64_t pos, int64_t kv_stride) {
+    static ClKernel knl;
+    if (!knl.kernel) {
+        build_kernel(knl, caicos_kernel_source, "kv_cache_append_q4");
+    }
+
+    clSetKernelArg(knl.kernel, 0, sizeof(cl_mem), &k_cache.mem);
+    clSetKernelArg(knl.kernel, 1, sizeof(cl_mem), &v_cache.mem);
+    clSetKernelArg(knl.kernel, 2, sizeof(cl_mem), &k_in.mem);
+    clSetKernelArg(knl.kernel, 3, sizeof(cl_mem), &v_in.mem);
+    cl_int p = (cl_int)pos, stride = (cl_int)kv_stride;
+    clSetKernelArg(knl.kernel, 4, sizeof(cl_int), &p);
+    clSetKernelArg(knl.kernel, 5, sizeof(cl_int), &stride);
+
+    size_t n_blocks = (size_t)(kv_stride / 32);
+    size_t local = 32;
+    size_t global = (n_blocks + local - 1) / local * local;
+    CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr), "kv_cache_append_q4");
+}
+
+void OpenClBackend::qwen_attention_step_q4(ClBuffer &q_buf, ClBuffer &k_cache, ClBuffer &v_cache, ClBuffer &attn_out, int64_t n_head, int64_t n_kv_head, int64_t head_dim, int64_t pos, int64_t max_seq) {
+    static ClKernel knl;
+    if (!knl.kernel) {
+        build_kernel(knl, caicos_kernel_source, "qwen_full_attention_step_q4");
+    }
+
+    clSetKernelArg(knl.kernel, 0, sizeof(cl_mem), &q_buf.mem);
+    clSetKernelArg(knl.kernel, 1, sizeof(cl_mem), &k_cache.mem);
+    clSetKernelArg(knl.kernel, 2, sizeof(cl_mem), &v_cache.mem);
+    clSetKernelArg(knl.kernel, 3, sizeof(cl_mem), &attn_out.mem);
+    cl_int nh = (cl_int)n_head, nkv = (cl_int)n_kv_head, hd = (cl_int)head_dim, p = (cl_int)pos, ms = (cl_int)max_seq;
+    clSetKernelArg(knl.kernel, 4, sizeof(cl_int), &nh);
+    clSetKernelArg(knl.kernel, 5, sizeof(cl_int), &nkv);
+    clSetKernelArg(knl.kernel, 6, sizeof(cl_int), &hd);
+    clSetKernelArg(knl.kernel, 7, sizeof(cl_int), &p);
+    clSetKernelArg(knl.kernel, 8, sizeof(cl_int), &ms);
+
+    size_t local = (size_t)head_dim;
+    size_t global = (size_t)n_head * local;
+    CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr), "qwen_full_attention_step_q4");
+}
+
+void OpenClBackend::gemv_q4_k(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t N, int64_t K) {
+    static ClKernel knl;
+    if (!knl.kernel) {
+        build_kernel(knl, caicos_kernel_source, "gemv_q4_k");
+    }
+
+    clSetKernelArg(knl.kernel, 0, sizeof(cl_mem), &a.mem);
+    clSetKernelArg(knl.kernel, 1, sizeof(cl_mem), &b.mem);
+    clSetKernelArg(knl.kernel, 2, sizeof(cl_mem), &dst.mem);
+    cl_int n = (cl_int)N, k = (cl_int)K;
+    clSetKernelArg(knl.kernel, 3, sizeof(cl_int), &n);
+    clSetKernelArg(knl.kernel, 4, sizeof(cl_int), &k);
+
+    size_t local = 64;
+    size_t global = ((size_t)N + local - 1) / local * local;
+    CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr), "gemv_q4_k");
+}
+
+void OpenClBackend::gemv_q6_k(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t N, int64_t K) {
+    static ClKernel knl;
+    if (!knl.kernel) {
+        build_kernel(knl, caicos_kernel_source, "gemv_q6_k");
+    }
+
+    clSetKernelArg(knl.kernel, 0, sizeof(cl_mem), &a.mem);
+    clSetKernelArg(knl.kernel, 1, sizeof(cl_mem), &b.mem);
+    clSetKernelArg(knl.kernel, 2, sizeof(cl_mem), &dst.mem);
+    cl_int n = (cl_int)N, k = (cl_int)K;
+    clSetKernelArg(knl.kernel, 3, sizeof(cl_int), &n);
+    clSetKernelArg(knl.kernel, 4, sizeof(cl_int), &k);
+
+    size_t local = 64;
+    size_t global = ((size_t)N + local - 1) / local * local;
+    CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr), "gemv_q6_k");
+}
+
+void OpenClBackend::gemm_q4_0(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t M, int64_t N, int64_t K) {
+    static ClKernel knl;
+    if (!knl.kernel) {
+        build_kernel(knl, caicos_kernel_source, "gemm_q4_0");
+    }
+
+    clSetKernelArg(knl.kernel, 0, sizeof(cl_mem), &a.mem);
+    clSetKernelArg(knl.kernel, 1, sizeof(cl_mem), &b.mem);
+    clSetKernelArg(knl.kernel, 2, sizeof(cl_mem), &dst.mem);
+    cl_int m = (cl_int)M, n = (cl_int)N, k = (cl_int)K;
+    clSetKernelArg(knl.kernel, 3, sizeof(cl_int), &m);
+    clSetKernelArg(knl.kernel, 4, sizeof(cl_int), &n);
+    clSetKernelArg(knl.kernel, 5, sizeof(cl_int), &k);
+
+    size_t local[2] = { 16, 4 };
+    size_t global[2] = { ((size_t)N + 15) / 16 * 16, ((size_t)M + 3) / 4 * 4 };
+    CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 2, nullptr, global, local, 0, nullptr, nullptr), "gemm_q4_0");
+}
+
 void OpenClBackend::argmax(ClBuffer &out_idx, ClBuffer &logits, int64_t n) {
     static ClKernel knl;
     if (!knl.kernel) {

@@ -237,8 +237,13 @@ public:
     void qwen_qk_norm(ClBuffer &dst, ClBuffer &src, ClBuffer &norm_w, int64_t num_heads, int64_t head_dim, float eps = 1e-6f);
     void qwen_attn_gate_mul(ClBuffer &attn_out, ClBuffer &gate, int64_t n);
     void qwen_attention_step(ClBuffer &q_buf, ClBuffer &k_cache, ClBuffer &v_cache, ClBuffer &attn_out, int64_t n_head, int64_t n_kv_head, int64_t head_dim, int64_t pos, int64_t max_seq);
+    void gemv_q4_k(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t N, int64_t K);
+    void gemv_q6_k(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t N, int64_t K);
+    void gemm_q4_0(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t M, int64_t N, int64_t K);
     void kv_cache_append_fp16(ClBuffer &k_cache, ClBuffer &v_cache, ClBuffer &k_in, ClBuffer &v_in, int64_t pos, int64_t kv_stride);
     void qwen_attention_step_fp16(ClBuffer &q_buf, ClBuffer &k_cache, ClBuffer &v_cache, ClBuffer &attn_out, int64_t n_head, int64_t n_kv_head, int64_t head_dim, int64_t pos, int64_t max_seq);
+    void kv_cache_append_q4(ClBuffer &k_cache, ClBuffer &v_cache, ClBuffer &k_in, ClBuffer &v_in, int64_t pos, int64_t kv_stride);
+    void qwen_attention_step_q4(ClBuffer &q_buf, ClBuffer &k_cache, ClBuffer &v_cache, ClBuffer &attn_out, int64_t n_head, int64_t n_kv_head, int64_t head_dim, int64_t pos, int64_t max_seq);
     int sample_logits(ClBuffer &logits, int64_t n_vocab, float temperature = 0.0f, int top_k = 40, float top_p = 0.9f);
 
     // Core operations

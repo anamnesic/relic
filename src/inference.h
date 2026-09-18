@@ -4,6 +4,7 @@
 #include "model.h"
 #include "tokenizer.h"
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -36,9 +37,10 @@ struct InferenceEngine
     // Forward pass for one token
     int forward(int token_id, float *logits = nullptr, bool compute_output = true);
 
-    // Generate text
+    // Generate text (with optional streaming token callback)
     std::string generate(const std::string &prompt, int max_tokens = 256,
-                         float temperature = 0.8f, int top_k = 40);
+                         float temperature = 0.8f, int top_k = 40,
+                         std::function<void(const std::string &)> on_token = nullptr);
 
 private:
     std::vector<int> find_prompt_lookup_draft(const std::vector<int> &tokens, int ngram_len, int max_draft);
