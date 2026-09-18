@@ -67,6 +67,7 @@ add_executable(relic_test
     src/backends/intel_uhd_backend.cpp
     src/backends/kernel_registry.cpp
     src/numerical_verifier.cpp
+    src/cli/cli_options.cpp
 )
 target_include_directories(relic_test PRIVATE src ${OpenCL_INCLUDE_DIRS})
 target_link_libraries(relic_test PRIVATE ${OpenCL_LIBRARIES})

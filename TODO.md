@@ -204,6 +204,7 @@
 - [x] **6. Driving CLI Command Controllers (`src/cli/`)**:
   - [x] Extract CLI sub-commands from `src/main.cpp` into dedicated command adapters (`CliOptions`, `BenchmarkCommand`, `InferenceCommand`, `ServerCommand`).
   - [x] Reduce `src/main.cpp` to a clean ~180-line application bootstrap.
+  - [x] Add automated unit tests for Driving & Driven Adapters in `src/test_opencl.cpp`.
 
 ---
 
@@ -213,11 +214,13 @@
 - [x] **2. Intra-Layer Kernel Fusion**:
   - [x] Fuse Residual Add + RMSNorm into `add_rms_norm` across Attention $\to$ FFN, FFN $\to$ Next Layer, and Final Layer $\to$ Logits.
   - [x] Eliminate 95 kernel launches and global memory round-trips per token across 24 layers.
-- [ ] **3. Vectorized 128-Bit Memory Transactions in GEMV Q4_0**:
+- [x] **3. Constant Dot-Product Bias Precomputation**:
+  - [x] Precompute $S_a = \sum_{k=0}^{31} a_k$ per block in `gemv_q4_0` and `gemv_q4_0_ffn_swiglu` to eliminate per-element $-8.0\text{f}$ subtractions in inner GEMV loops.
+- [ ] **4. Vectorized 128-Bit Memory Transactions & Aligned Coalescing in GEMV Q4_0**:
   - [ ] Implement 128-bit (`uint4` / `vload4`) aligned block reads in `gemv_q4_0` and `gemv_q4_0_ffn_swiglu`.
-  - [ ] Minimize register pressure and memory pipeline stalls on NVIDIA Turing SM 75 architecture.
-- [ ] **4. Constant Dot-Product Bias Precomputation**:
-  - [ ] Precompute $S_a = \sum_{k=0}^{31} a_k$ per block to eliminate per-element $-8.0\text{f}$ subtraction in GEMV dot products.
+  - [ ] Interleaved block layout in VRAM to prevent 18-byte cache-line misalignment on NVIDIA Turing SM 75 architecture.
+- [ ] **5. Dynamic Local Memory Sizing for High Warp Occupancy**:
+  - [ ] Scale local activation buffer `l_a` dynamically based on layer dimension rather than static 24 KB allocation to maximize active warps per SM.
 
 ---
 

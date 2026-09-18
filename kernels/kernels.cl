@@ -363,32 +363,35 @@ kernel void gemv_q4_0(
         global const uchar *qs3 = b_blk3 + 2;
 
         float block_acc0 = 0.0f, block_acc1 = 0.0f, block_acc2 = 0.0f, block_acc3 = 0.0f;
+        float sum_a = 0.0f;
 
         if (K <= 6144) {
             local const float *a_blk = l_a + blk * 32;
             for (int i = 0; i < 4; i++) {
                 float4 a_lo = vload4(i, a_blk);
                 float4 a_hi = vload4(i + 4, a_blk);
+                sum_a += a_lo.x + a_lo.y + a_lo.z + a_lo.w +
+                         a_hi.x + a_hi.y + a_hi.z + a_hi.w;
 
                 uchar4 qb0 = vload4(i, qs0);
                 uchar4 qb1 = vload4(i, qs1);
                 uchar4 qb2 = vload4(i, qs2);
                 uchar4 qb3 = vload4(i, qs3);
 
-                float4 v_lo0 = convert_float4(qb0 & (uchar4)0x0F) - (float4)8.0f;
-                float4 v_hi0 = convert_float4(qb0 >> (uchar4)4)   - (float4)8.0f;
+                float4 v_lo0 = convert_float4(qb0 & (uchar4)0x0F);
+                float4 v_hi0 = convert_float4(qb0 >> (uchar4)4);
                 block_acc0 += dot(a_lo, v_lo0) + dot(a_hi, v_hi0);
 
-                float4 v_lo1 = convert_float4(qb1 & (uchar4)0x0F) - (float4)8.0f;
-                float4 v_hi1 = convert_float4(qb1 >> (uchar4)4)   - (float4)8.0f;
+                float4 v_lo1 = convert_float4(qb1 & (uchar4)0x0F);
+                float4 v_hi1 = convert_float4(qb1 >> (uchar4)4);
                 block_acc1 += dot(a_lo, v_lo1) + dot(a_hi, v_hi1);
 
-                float4 v_lo2 = convert_float4(qb2 & (uchar4)0x0F) - (float4)8.0f;
-                float4 v_hi2 = convert_float4(qb2 >> (uchar4)4)   - (float4)8.0f;
+                float4 v_lo2 = convert_float4(qb2 & (uchar4)0x0F);
+                float4 v_hi2 = convert_float4(qb2 >> (uchar4)4);
                 block_acc2 += dot(a_lo, v_lo2) + dot(a_hi, v_hi2);
 
-                float4 v_lo3 = convert_float4(qb3 & (uchar4)0x0F) - (float4)8.0f;
-                float4 v_hi3 = convert_float4(qb3 >> (uchar4)4)   - (float4)8.0f;
+                float4 v_lo3 = convert_float4(qb3 & (uchar4)0x0F);
+                float4 v_hi3 = convert_float4(qb3 >> (uchar4)4);
                 block_acc3 += dot(a_lo, v_lo3) + dot(a_hi, v_hi3);
             }
         } else {
@@ -396,34 +399,37 @@ kernel void gemv_q4_0(
             for (int i = 0; i < 4; i++) {
                 float4 a_lo = vload4(i, a_blk);
                 float4 a_hi = vload4(i + 4, a_blk);
+                sum_a += a_lo.x + a_lo.y + a_lo.z + a_lo.w +
+                         a_hi.x + a_hi.y + a_hi.z + a_hi.w;
 
                 uchar4 qb0 = vload4(i, qs0);
                 uchar4 qb1 = vload4(i, qs1);
                 uchar4 qb2 = vload4(i, qs2);
                 uchar4 qb3 = vload4(i, qs3);
 
-                float4 v_lo0 = convert_float4(qb0 & (uchar4)0x0F) - (float4)8.0f;
-                float4 v_hi0 = convert_float4(qb0 >> (uchar4)4)   - (float4)8.0f;
+                float4 v_lo0 = convert_float4(qb0 & (uchar4)0x0F);
+                float4 v_hi0 = convert_float4(qb0 >> (uchar4)4);
                 block_acc0 += dot(a_lo, v_lo0) + dot(a_hi, v_hi0);
 
-                float4 v_lo1 = convert_float4(qb1 & (uchar4)0x0F) - (float4)8.0f;
-                float4 v_hi1 = convert_float4(qb1 >> (uchar4)4)   - (float4)8.0f;
+                float4 v_lo1 = convert_float4(qb1 & (uchar4)0x0F);
+                float4 v_hi1 = convert_float4(qb1 >> (uchar4)4);
                 block_acc1 += dot(a_lo, v_lo1) + dot(a_hi, v_hi1);
 
-                float4 v_lo2 = convert_float4(qb2 & (uchar4)0x0F) - (float4)8.0f;
-                float4 v_hi2 = convert_float4(qb2 >> (uchar4)4)   - (float4)8.0f;
+                float4 v_lo2 = convert_float4(qb2 & (uchar4)0x0F);
+                float4 v_hi2 = convert_float4(qb2 >> (uchar4)4);
                 block_acc2 += dot(a_lo, v_lo2) + dot(a_hi, v_hi2);
 
-                float4 v_lo3 = convert_float4(qb3 & (uchar4)0x0F) - (float4)8.0f;
-                float4 v_hi3 = convert_float4(qb3 >> (uchar4)4)   - (float4)8.0f;
+                float4 v_lo3 = convert_float4(qb3 & (uchar4)0x0F);
+                float4 v_hi3 = convert_float4(qb3 >> (uchar4)4);
                 block_acc3 += dot(a_lo, v_lo3) + dot(a_hi, v_hi3);
             }
         }
 
-        sum0 += block_acc0 * d0;
-        sum1 += block_acc1 * d1;
-        sum2 += block_acc2 * d2;
-        sum3 += block_acc3 * d3;
+        float bias = 8.0f * sum_a;
+        sum0 += (block_acc0 - bias) * d0;
+        sum1 += (block_acc1 - bias) * d1;
+        sum2 += (block_acc2 - bias) * d2;
+        sum3 += (block_acc3 - bias) * d3;
     }
 
     l_sum0[warp_id][lane] = sum0;
@@ -525,22 +531,25 @@ kernel void gemv_q4_0_ffn_swiglu(
 
         float block_acc_gate[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
         float block_acc_up[8]   = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        float sum_a = 0.0f;
 
         if (K <= 2048) {
             local const float *a_blk = l_a + blk * 32;
             for (int i = 0; i < 4; i++) {
                 float4 a_lo = vload4(i, a_blk);
                 float4 a_hi = vload4(i + 4, a_blk);
+                sum_a += a_lo.x + a_lo.y + a_lo.z + a_lo.w +
+                         a_hi.x + a_hi.y + a_hi.z + a_hi.w;
 
                 for (int r = 0; r < 8; r++) {
                     uchar4 qb_g = vload4(i, qs_gate[r]);
-                    float4 vg_lo = convert_float4(qb_g & (uchar4)0x0F) - (float4)8.0f;
-                    float4 vg_hi = convert_float4(qb_g >> (uchar4)4)   - (float4)8.0f;
+                    float4 vg_lo = convert_float4(qb_g & (uchar4)0x0F);
+                    float4 vg_hi = convert_float4(qb_g >> (uchar4)4);
                     block_acc_gate[r] += dot(a_lo, vg_lo) + dot(a_hi, vg_hi);
 
                     uchar4 qb_u = vload4(i, qs_up[r]);
-                    float4 vu_lo = convert_float4(qb_u & (uchar4)0x0F) - (float4)8.0f;
-                    float4 vu_hi = convert_float4(qb_u >> (uchar4)4)   - (float4)8.0f;
+                    float4 vu_lo = convert_float4(qb_u & (uchar4)0x0F);
+                    float4 vu_hi = convert_float4(qb_u >> (uchar4)4);
                     block_acc_up[r] += dot(a_lo, vu_lo) + dot(a_hi, vu_hi);
                 }
             }
@@ -549,24 +558,27 @@ kernel void gemv_q4_0_ffn_swiglu(
             for (int i = 0; i < 4; i++) {
                 float4 a_lo = vload4(i, a_blk);
                 float4 a_hi = vload4(i + 4, a_blk);
+                sum_a += a_lo.x + a_lo.y + a_lo.z + a_lo.w +
+                         a_hi.x + a_hi.y + a_hi.z + a_hi.w;
 
                 for (int r = 0; r < 8; r++) {
                     uchar4 qb_g = vload4(i, qs_gate[r]);
-                    float4 vg_lo = convert_float4(qb_g & (uchar4)0x0F) - (float4)8.0f;
-                    float4 vg_hi = convert_float4(qb_g >> (uchar4)4)   - (float4)8.0f;
+                    float4 vg_lo = convert_float4(qb_g & (uchar4)0x0F);
+                    float4 vg_hi = convert_float4(qb_g >> (uchar4)4);
                     block_acc_gate[r] += dot(a_lo, vg_lo) + dot(a_hi, vg_hi);
 
                     uchar4 qb_u = vload4(i, qs_up[r]);
-                    float4 vu_lo = convert_float4(qb_u & (uchar4)0x0F) - (float4)8.0f;
-                    float4 vu_hi = convert_float4(qb_u >> (uchar4)4)   - (float4)8.0f;
+                    float4 vu_lo = convert_float4(qb_u & (uchar4)0x0F);
+                    float4 vu_hi = convert_float4(qb_u >> (uchar4)4);
                     block_acc_up[r] += dot(a_lo, vu_lo) + dot(a_hi, vu_hi);
                 }
             }
         }
 
+        float bias = 8.0f * sum_a;
         for (int r = 0; r < 8; r++) {
-            sum_gate[r] += block_acc_gate[r] * d_gate[r];
-            sum_up[r]   += block_acc_up[r]   * d_up[r];
+            sum_gate[r] += (block_acc_gate[r] - bias) * d_gate[r];
+            sum_up[r]   += (block_acc_up[r]   - bias) * d_up[r];
         }
     }
 

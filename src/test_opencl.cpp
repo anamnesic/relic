@@ -8,6 +8,7 @@
 #include "speculative/distributed_speculative.h"
 #include "backends/intel_uhd_backend.h"
 #include "numerical_verifier.h"
+#include "cli/cli_options.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -481,8 +482,46 @@ int main(int argc, char **argv)
                 m.passed ? "PASS" : "FAIL");
         num_pass &= m.passed;
     }
-    pass &= num_pass;
-    pass &= num_pass;
+    // Phase 5 Hexagonal Driving & Driven Adapter Verification
+    fprintf(stdout, "\nRunning Phase 5 Hexagonal Driving & Driven Adapter tests...\n");
+
+    // 1. Driving Adapter: CLI Options Parsing
+    const char *mock_argv[] = {
+        "relic", "-m", "models/test.gguf", "-p", "Test prompt",
+        "-n", "128", "-t", "0.5", "-k", "30", "--budget-mb", "1500",
+        "--server", "9090"
+    };
+    int mock_argc = sizeof(mock_argv) / sizeof(mock_argv[0]);
+    CliOptions parsed_opt = parse_cli_options(mock_argc, const_cast<char**>(mock_argv));
+    bool cli_pass = (parsed_opt.model_path == "models/test.gguf" &&
+                     parsed_opt.prompt == "Test prompt" &&
+                     parsed_opt.n_tokens == 128 &&
+                     fabsf(parsed_opt.temperature - 0.5f) < 1e-4f &&
+                     parsed_opt.top_k == 30 &&
+                     parsed_opt.vram_budget_mb == 1500 &&
+                     parsed_opt.server_mode == true &&
+                     parsed_opt.server_port == 9090);
+    fprintf(stdout, "  Driving Adapter (CliOptions Parsing): %s\n", cli_pass ? "PASS" : "FAIL");
+    pass &= cli_pass;
+
+    // 2. Driven Adapter: Polymorphic Backend Interface & BackendBuffer
+    Backend &backend_ref = cl;
+    DeviceStats stats = backend_ref.query_stats();
+    bool backend_stats_pass = (!stats.device_name.empty() && stats.type == BackendDeviceType::NVIDIA_GPU);
+
+    auto test_buf = backend_ref.allocate(1024 * sizeof(float), MemoryTier::TIER0_DEDICATED_VRAM);
+    bool buf_alloc_pass = (test_buf != nullptr && test_buf->size() == 1024 * sizeof(float) && test_buf->raw_handle() != nullptr);
+
+    std::vector<float> host_in(1024, 2.5f);
+    std::vector<float> host_out(1024, 0.0f);
+    bool upload_pass = backend_ref.upload(*test_buf, host_in.data(), 1024 * sizeof(float));
+    backend_ref.synchronize();
+    bool download_pass = backend_ref.download(host_out.data(), *test_buf, 1024 * sizeof(float));
+    bool roundtrip_pass = (upload_pass && download_pass && fabsf(host_out[0] - 2.5f) < 1e-5f);
+
+    bool backend_port_pass = (backend_stats_pass && buf_alloc_pass && roundtrip_pass);
+    fprintf(stdout, "  Driven Adapter (Backend Interface & BackendBuffer Polymorphism): %s\n", backend_port_pass ? "PASS" : "FAIL");
+    pass &= backend_port_pass;
 
     // Device info summary
     fprintf(stdout, "\n=== Device Summary ===\n");
