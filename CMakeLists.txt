@@ -38,6 +38,10 @@ add_executable(relic
     src/benchmark_suite.cpp
     src/numerical_verifier.cpp
     src/server.cpp
+    src/cli/cli_options.cpp
+    src/cli/benchmark_command.cpp
+    src/cli/inference_command.cpp
+    src/cli/server_command.cpp
 )
 
 add_executable(relic_test

@@ -11,7 +11,7 @@ public:
     ~Qwen35MlpBlock() = default;
 
     void forward(int64_t layer, const ArchitectureSpec &arch, const LlamaModel &model,
-                 ClBuffer &gpu_hidden, ClBuffer &gpu_residual,
+                 ClBuffer &gpu_hidden, ClBuffer &gpu_residual, ClBuffer &gpu_attn_out,
                  ClBuffer &gpu_ffn_act, ClBuffer &gpu_gate, ClBuffer &gpu_up);
 
 private:

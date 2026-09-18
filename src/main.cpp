@@ -1,3 +1,7 @@
+#include "cli/cli_options.h"
+#include "cli/benchmark_command.h"
+#include "cli/inference_command.h"
+#include "cli/server_command.h"
 #include "gguf_reader.h"
 #include "model.h"
 #include "opencl_backend.h"
@@ -5,164 +9,27 @@
 #include "inference.h"
 #include "planner/hardware_profile.h"
 #include "planner/adaptive_planner.h"
-#include "benchmark_suite.h"
-#include "server.h"
 #include <cstdio>
-#include <cstring>
-#include <string>
-#include <vector>
-
-using Gpt2Tokenizer = Tokenizer;
-
-static bool load_model(const std::string &path, LlamaModel &model)
-{
-    return model.load(path.c_str());
-}
-
-void print_usage(const char *prog)
-{
-    fprintf(stdout, "Relic - High-Performance Heterogeneous LLM Runtime\n");
-    fprintf(stdout, "Maximize LLM inference under a fixed memory budget.\n\n");
-    fprintf(stdout, "Usage: %s [options] -m <model.gguf>\n", prog);
-    fprintf(stdout, "Options:\n");
-    fprintf(stdout, "  -m <file>             Model file (GGUF format)\n");
-    fprintf(stdout, "  -p <prompt>           Input prompt\n");
-    fprintf(stdout, "  -n <int>              Number of tokens to generate (default: 256)\n");
-    fprintf(stdout, "  -t <float>            Temperature (default: 0.8, use 0.0 for greedy argmax)\n");
-    fprintf(stdout, "  -k <int>              Top-k sampling (default: 40)\n");
-    fprintf(stdout, "  --list-devices        List OpenCL devices and exit\n");
-    fprintf(stdout, "  --profile             Probe and output full hardware profile to devices.json\n");
-    fprintf(stdout, "  --bench               Run comprehensive benchmark suite with statistical metrics\n");
-    fprintf(stdout, "  --bench-json <file>   Export benchmark results to JSON\n");
-    fprintf(stdout, "  --bench-csv <file>    Export benchmark results to CSV\n");
-    fprintf(stdout, "  --platform <int>      OpenCL platform index (default: auto)\n");
-    fprintf(stdout, "  --device <int>        OpenCL device index (default: 0)\n");
-    fprintf(stdout, "  --cpu                 Force CPU-only mode\n");
-    fprintf(stdout, "  --speculative         Enable speculative decoding\n");
-    fprintf(stdout, "  --ngram <int>         Speculative n-gram size (default: 3)\n");
-    fprintf(stdout, "  --draft-max <int>     Speculative max draft tokens (default: 3)\n");
-    fprintf(stdout, "  -i, --interactive     Keep model resident in GPU VRAM and enter interactive REPL\n");
-    fprintf(stdout, "  --server [port]       Run as persistent VRAM HTTP/TCP server daemon (default: 8080)\n");
-    fprintf(stdout, "  --client [port]       Query running persistent server without reloading model\n");
-    fprintf(stdout, "  --max-seq-len <int>   Maximum sequence length (default: 2048)\n\n");
-    fprintf(stdout, "Available OpenCL platforms & devices:\n");
-    OpenClBackend::list_devices();
-}
 
 int main(int argc, char **argv)
 {
     setvbuf(stdout, nullptr, _IONBF, 0);
     setvbuf(stderr, nullptr, _IONBF, 0);
-    std::string model_path;
-    std::string prompt = "Once upon a time";
-    std::string bench_json_path;
-    std::string bench_csv_path;
-    int n_tokens = 256;
-    float temperature = 0.8f;
-    int top_k = 40;
-    int platform_idx = -1;
-    int device_idx = 0;
-    bool list_devices = false;
-    bool run_profile = false;
-    bool run_bench = false;
-    bool cpu_only = false;
-    bool speculative = false;
-    int speculative_ngram = 3;
-    int speculative_draft_max = 3;
-    int max_seq_len = 2048;
-    int vram_budget_mb = 0;
-    bool run_sweep = false;
-    bool run_ablation = false;
-    bool run_cliff_analysis = false;
-    int bench_runs = 5;
-    int bench_warmup = 2;
-    bool interactive = false;
-    bool server_mode = false;
-    int server_port = 8080;
-    bool client_mode = false;
-    int client_port = 8080;
 
-    for (int i = 1; i < argc; i++)
+    CliOptions opt = parse_cli_options(argc, argv);
+
+    if (opt.show_help)
     {
-        if (strcmp(argv[i], "-m") == 0 && i + 1 < argc)
-            model_path = argv[++i];
-        else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc)
-            prompt = argv[++i];
-        else if (strcmp(argv[i], "-n") == 0 && i + 1 < argc)
-            n_tokens = atoi(argv[++i]);
-        else if (strcmp(argv[i], "-t") == 0 && i + 1 < argc)
-            temperature = (float)atof(argv[++i]);
-        else if (strcmp(argv[i], "-k") == 0 && i + 1 < argc)
-            top_k = atoi(argv[++i]);
-        else if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--interactive") == 0)
-            interactive = true;
-        else if (strcmp(argv[i], "--server") == 0)
-        {
-            server_mode = true;
-            if (i + 1 < argc && argv[i + 1][0] != '-')
-                server_port = atoi(argv[++i]);
-        }
-        else if (strcmp(argv[i], "--client") == 0)
-        {
-            client_mode = true;
-            if (i + 1 < argc && argv[i + 1][0] != '-')
-                client_port = atoi(argv[++i]);
-        }
-        else if (strcmp(argv[i], "--runs") == 0 && i + 1 < argc)
-            bench_runs = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--warmup") == 0 && i + 1 < argc)
-            bench_warmup = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--list-devices") == 0)
-            list_devices = true;
-        else if (strcmp(argv[i], "--profile") == 0)
-            run_profile = true;
-        else if (strcmp(argv[i], "--bench") == 0)
-            run_bench = true;
-        else if (strcmp(argv[i], "--bench-json") == 0 && i + 1 < argc)
-        {
-            bench_json_path = argv[++i];
-            run_bench = true;
-        }
-        else if (strcmp(argv[i], "--bench-csv") == 0 && i + 1 < argc)
-        {
-            bench_csv_path = argv[++i];
-            run_bench = true;
-        }
-        else if (strcmp(argv[i], "--platform") == 0 && i + 1 < argc)
-            platform_idx = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--device") == 0 && i + 1 < argc)
-            device_idx = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--cpu") == 0)
-            cpu_only = true;
-        else if (strcmp(argv[i], "--speculative") == 0)
-            speculative = true;
-        else if (strcmp(argv[i], "--ngram") == 0 && i + 1 < argc)
-            speculative_ngram = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--draft-max") == 0 && i + 1 < argc)
-            speculative_draft_max = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--max-seq-len") == 0 && i + 1 < argc)
-            max_seq_len = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--vram-budget-mb") == 0 && i + 1 < argc)
-            vram_budget_mb = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--sweep") == 0)
-            run_sweep = true;
-        else if (strcmp(argv[i], "--ablation") == 0)
-            run_ablation = true;
-        else if (strcmp(argv[i], "--cliff-analysis") == 0)
-            run_cliff_analysis = true;
-        else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0)
-        {
-            print_usage(argv[0]);
-            return 0;
-        }
+        print_usage(argv[0]);
+        return 0;
     }
 
-    if (client_mode)
+    if (opt.client_mode)
     {
-        return run_relic_client(client_port, prompt, n_tokens, temperature, top_k);
+        return ServerCommand::execute_client(opt);
     }
 
-    if (run_profile)
+    if (opt.run_profile)
     {
         fprintf(stdout, "=== Relic Hardware Profiler ===\n");
         HardwareProfile prof = HardwareProfile::probe_system();
@@ -187,14 +54,14 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    if (list_devices)
+    if (opt.list_devices)
     {
         fprintf(stdout, "Available OpenCL platforms & devices:\n");
         OpenClBackend::list_devices();
         return 0;
     }
 
-    if (model_path.empty())
+    if (opt.model_path.empty())
     {
         print_usage(argv[0]);
         return 1;
@@ -202,16 +69,16 @@ int main(int argc, char **argv)
 
     // Load model
     fprintf(stdout, "Loading model...\n");
-    LlamaModel model;
-    if (!load_model(model_path, model))
+    NeuralModel model;
+    if (!model.load(opt.model_path.c_str()))
     {
-        fprintf(stderr, "Failed to load model from %s\n", model_path.c_str());
+        fprintf(stderr, "Failed to load model from %s\n", opt.model_path.c_str());
         return 1;
     }
 
     // Load tokenizer
     GgufReader reader;
-    if (!reader.load(model_path.c_str()))
+    if (!reader.load(opt.model_path.c_str()))
     {
         fprintf(stderr, "Failed to read GGUF metadata for tokenizer\n");
         return 1;
@@ -227,9 +94,9 @@ int main(int argc, char **argv)
     // Initialize OpenCL
     OpenClBackend cl;
     bool cl_ok = false;
-    if (!cpu_only)
+    if (!opt.cpu_only)
     {
-        cl_ok = cl.init(platform_idx, device_idx);
+        cl_ok = cl.init(opt.platform_idx, opt.device_idx);
         if (!cl_ok)
         {
             fprintf(stdout, "OpenCL init failed, falling back to CPU\n");
@@ -242,259 +109,23 @@ int main(int argc, char **argv)
 
     HardwareProfile prof = HardwareProfile::probe_system();
 
-    if (run_ablation)
+    if (opt.run_ablation)
     {
-        fprintf(stdout, "\n========================================================================================================\n");
-        fprintf(stdout, "               RELIC FACTORIAL ABLATION (2x2): UHD & DMA OVERLAP DECOMPOSITION                           \n");
-        fprintf(stdout, "========================================================================================================\n");
-        fprintf(stdout, "| Configuration                    | Decode (tok/s) | p50 (tok/s) | p95 (tok/s) | StdDev | Speedup vs CPU |\n");
-        fprintf(stdout, "|----------------------------------|----------------|-------------|-------------|--------|----------------|\n");
-
-        struct AblationEntry {
-            std::string name;
-            int budget_mb;
-            bool enable_uhd;
-            bool enable_overlap;
-            bool force_cpu;
-        };
-        std::vector<AblationEntry> ab_configs = {
-            {"6. Pure CPU Baseline (AVX2)",        3500, false, false, true},
-            {"1. Full GPU Baseline (3500 MB)",      3500, true,  true,  false},
-            {"2. 1500 MB: UHD ON  + Overlap ON",    1500, true,  true,  false},
-            {"3. 1500 MB: UHD ON  + Overlap OFF",   1500, true,  false, false},
-            {"4. 1500 MB: UHD OFF + Overlap ON",    1500, false, true,  false},
-            {"5. 1500 MB: UHD OFF + Overlap OFF",   1500, false, false, false}
-        };
-
-        struct Meas {
-            std::string name;
-            double tok_s, p50, p95, stddev;
-        };
-        std::vector<Meas> measurements;
-        double cpu_tok_s = 6.20;
-
-        for (const auto &ac : ab_configs)
-        {
-            size_t b_bytes = (size_t)ac.budget_mb * 1024 * 1024;
-            ExecutionPlan p = AdaptivePlanner::generate_plan(model, prof, b_bytes, ac.enable_uhd, ac.enable_overlap);
-
-            InferenceEngine sw_engine;
-            sw_engine.enable_speculative = speculative;
-            sw_engine.speculative_ngram = speculative_ngram;
-            sw_engine.speculative_max_draft = speculative_draft_max;
-
-            ClMemoryTracker::reset_peak();
-            if (sw_engine.init(&model, &tokenizer, (!ac.force_cpu && cl_ok) ? &cl : nullptr, max_seq_len, &p))
-            {
-                BenchmarkSuiteResult b_res = BenchmarkSuite::run_full_suite(sw_engine, prompt, n_tokens, bench_runs, bench_warmup, temperature, top_k);
-                double tok_s = b_res.stats.median_decode_tok_per_sec;
-                if (ac.force_cpu) cpu_tok_s = tok_s;
-
-                measurements.push_back({ac.name, tok_s, b_res.stats.p50_decode_tok_per_sec, b_res.stats.p95_decode_tok_per_sec, b_res.stats.stddev_decode_tok_per_sec});
-                sw_engine.free_buffers();
-            }
-        }
-
-        for (const auto &m : measurements)
-        {
-            double speedup = (cpu_tok_s > 0) ? (m.tok_s / cpu_tok_s) : 1.0;
-            fprintf(stdout, "| %-32s | %14.2f | %11.2f | %11.2f | %6.2f | %13.2fx |\n",
-                    m.name.c_str(), m.tok_s, m.p50, m.p95, m.stddev, speedup);
-        }
-        fprintf(stdout, "========================================================================================================\n");
-        return 0;
+        return BenchmarkCommand::execute_ablation(opt, model, tokenizer, cl_ok ? &cl : nullptr, cl_ok, prof);
     }
 
-    if (run_cliff_analysis)
+    if (opt.run_cliff_analysis)
     {
-        fprintf(stdout, "\n========================================================================================================\n");
-        fprintf(stdout, "             RELIC CRITICAL GPU RESIDENCY SET IDENTIFICATION (CLIFF ROOT-CAUSE DECOMPOSITION)           \n");
-        fprintf(stdout, "========================================================================================================\n");
-
-        ExecutionPlan plan_1500 = AdaptivePlanner::generate_plan(model, prof, 1500 * 1024 * 1024, true, true);
-        ExecutionPlan plan_1450 = AdaptivePlanner::generate_plan(model, prof, 1450 * 1024 * 1024, true, true);
-
-        std::vector<std::pair<std::string, size_t>> evicted_tensors;
-        size_t total_evicted_bytes = 0;
-
-        for (const auto &kv : plan_1500.tensor_placements)
-        {
-            if (kv.second.keep_resident_in_vram)
-            {
-                auto it2 = plan_1450.tensor_placements.find(kv.first);
-                if (it2 != plan_1450.tensor_placements.end() && !it2->second.keep_resident_in_vram)
-                {
-                    evicted_tensors.push_back({kv.first, kv.second.resident_bytes});
-                    total_evicted_bytes += kv.second.resident_bytes;
-                }
-            }
-        }
-
-        fprintf(stdout, "Identified %zu Evicted Tensors at 1450 MB Boundary (Total Evicted: %.2f MB):\n",
-                evicted_tensors.size(), (double)total_evicted_bytes / (1024.0 * 1024.0));
-        for (const auto &ev : evicted_tensors)
-        {
-            fprintf(stdout, "  * %-45s (%.2f MB)\n", ev.first.c_str(), (double)ev.second / (1024.0 * 1024.0));
-        }
-
-        fprintf(stdout, "\nEvaluating Selective Pinning Recovery at 1450 MB Budget:\n");
-        fprintf(stdout, "| Configuration                                      | Decode (tok/s) | p50 (tok/s) | Preserved |\n");
-        fprintf(stdout, "|----------------------------------------------------|----------------|-------------|-----------|\n");
-
-        // 1. Benchmark 1500 MB Baseline
-        InferenceEngine eng_1500;
-        if (eng_1500.init(&model, &tokenizer, cl_ok ? &cl : nullptr, max_seq_len, &plan_1500))
-        {
-            BenchmarkSuiteResult r = BenchmarkSuite::run_full_suite(eng_1500, prompt, n_tokens, bench_runs, bench_warmup, temperature, top_k);
-            double base_1500 = r.stats.median_decode_tok_per_sec;
-            fprintf(stdout, "| Baseline (1500 MB Budget)                          | %14.2f | %11.2f |    100.0%% |\n", base_1500, r.stats.p50_decode_tok_per_sec);
-            eng_1500.free_buffers();
-
-            // 2. Benchmark 1450 MB Unpinned
-            InferenceEngine eng_1450;
-            if (eng_1450.init(&model, &tokenizer, cl_ok ? &cl : nullptr, max_seq_len, &plan_1450))
-            {
-                BenchmarkSuiteResult r1450 = BenchmarkSuite::run_full_suite(eng_1450, prompt, n_tokens, bench_runs, bench_warmup, temperature, top_k);
-                double p1450_pct = (base_1500 > 0) ? (r1450.stats.median_decode_tok_per_sec / base_1500 * 100.0) : 0.0;
-                fprintf(stdout, "| 1450 MB Unpinned (Evicted Set Active)              | %14.2f | %11.2f | %8.1f%% |\n",
-                        r1450.stats.median_decode_tok_per_sec, r1450.stats.p50_decode_tok_per_sec, p1450_pct);
-                eng_1450.free_buffers();
-            }
-
-            // 3. Test pinning the first critical tensor from the evicted set
-            if (!evicted_tensors.empty())
-            {
-                ExecutionPlan plan_pinned = plan_1450;
-                const std::string &crit_name = evicted_tensors[0].first;
-                plan_pinned.tensor_placements[crit_name].keep_resident_in_vram = true;
-                plan_pinned.tensor_placements[crit_name].target_device = BackendDeviceType::NVIDIA_GPU;
-                plan_pinned.tensor_placements[crit_name].target_tier = MemoryTier::TIER0_DEDICATED_VRAM;
-
-                InferenceEngine eng_pinned;
-                if (eng_pinned.init(&model, &tokenizer, cl_ok ? &cl : nullptr, max_seq_len, &plan_pinned))
-                {
-                    BenchmarkSuiteResult r_pin = BenchmarkSuite::run_full_suite(eng_pinned, prompt, n_tokens, bench_runs, bench_warmup, temperature, top_k);
-                    double ppin_pct = (base_1500 > 0) ? (r_pin.stats.median_decode_tok_per_sec / base_1500 * 100.0) : 0.0;
-                    fprintf(stdout, "| 1450 MB + Pinned [%-30s] | %14.2f | %11.2f | %8.1f%% |\n",
-                            crit_name.c_str(), r_pin.stats.median_decode_tok_per_sec, r_pin.stats.p50_decode_tok_per_sec, ppin_pct);
-                    eng_pinned.free_buffers();
-                }
-            }
-        }
-        fprintf(stdout, "========================================================================================================\n\n");
-        return 0;
+        return BenchmarkCommand::execute_cliff_analysis(opt, model, tokenizer, cl_ok ? &cl : nullptr, cl_ok, prof);
     }
 
-    if (run_sweep)
+    if (opt.run_sweep)
     {
-        fprintf(stdout, "\n====================================================================================================================================================\n");
-        fprintf(stdout, "                                   RELIC WORKING SET DISCOVERY & EMPIRICAL SWEEP                                                     \n");
-        fprintf(stdout, "====================================================================================================================================================\n");
-        fprintf(stdout, "| Budget  | GTX Weights | Intel UHD | Pinned RAM | Accounted Peak | Measured OpenCL | Median tok/s | p50 tok/s | p95 tok/s | StdDev | Preserved |\n");
-        fprintf(stdout, "|---------|-------------|-----------|------------|----------------|-----------------|--------------|-----------|-----------|--------|-----------|\n");
-
-        std::vector<int> test_budgets_mb = {3500, 2000, 1750, 1500, 1450, 1400, 1350, 1300, 1250, 1000, 750};
-        struct SweepPoint {
-            int budget_mb;
-            size_t gtx_weights;
-            size_t intel_uhd_weights;
-            size_t pinned_weights;
-            size_t accounted_peak;
-            size_t measured_opencl_peak;
-            double median_tok_s;
-            double p50_tok_s;
-            double p95_tok_s;
-            double stddev_tok_s;
-            double preserved_pct;
-        };
-        std::vector<SweepPoint> points;
-        double baseline_tok_s = 0.0;
-
-        for (int b_mb : test_budgets_mb)
-        {
-            size_t b_bytes = (size_t)b_mb * 1024 * 1024;
-            ExecutionPlan p = AdaptivePlanner::generate_plan(model, prof, b_bytes, true, true);
-
-            InferenceEngine sw_engine;
-            sw_engine.enable_speculative = speculative;
-            sw_engine.speculative_ngram = speculative_ngram;
-            sw_engine.speculative_max_draft = speculative_draft_max;
-
-            ClMemoryTracker::reset_peak();
-            if (sw_engine.init(&model, &tokenizer, cl_ok ? &cl : nullptr, max_seq_len, &p))
-            {
-                BenchmarkSuiteResult b_res = BenchmarkSuite::run_full_suite(sw_engine, prompt, n_tokens, bench_runs, bench_warmup, temperature, top_k);
-                double tok_s = b_res.stats.median_decode_tok_per_sec;
-                if (baseline_tok_s == 0.0) baseline_tok_s = tok_s;
-                double preserved_pct = (baseline_tok_s > 0) ? (tok_s / baseline_tok_s * 100.0) : 100.0;
-
-                size_t measured_cl_peak = ClMemoryTracker::peak_bytes;
-                points.push_back({
-                    b_mb,
-                    p.gtx_vram_weights_bytes,
-                    p.intel_uhd_weights_bytes,
-                    p.pinned_streamed_weights_bytes,
-                    p.accounted_gtx_allocation_bytes,
-                    measured_cl_peak,
-                    tok_s,
-                    b_res.stats.p50_decode_tok_per_sec,
-                    b_res.stats.p95_decode_tok_per_sec,
-                    b_res.stats.stddev_decode_tok_per_sec,
-                    preserved_pct
-                });
-
-                fprintf(stdout, "| %4d MB | %8.1f MB | %6.1f MB | %7.1f MB | %11.1f MB | %12.1f MB | %12.2f | %9.2f | %9.2f | %6.2f | %8.1f%% |\n",
-                        b_mb,
-                        (double)p.gtx_vram_weights_bytes / (1024.0 * 1024.0),
-                        (double)p.intel_uhd_weights_bytes / (1024.0 * 1024.0),
-                        (double)p.pinned_streamed_weights_bytes / (1024.0 * 1024.0),
-                        (double)p.accounted_gtx_allocation_bytes / (1024.0 * 1024.0),
-                        (double)measured_cl_peak / (1024.0 * 1024.0),
-                        tok_s, b_res.stats.p50_decode_tok_per_sec, b_res.stats.p95_decode_tok_per_sec,
-                        b_res.stats.stddev_decode_tok_per_sec, preserved_pct);
-                sw_engine.free_buffers();
-            }
-        }
-        fprintf(stdout, "====================================================================================================================================================\n");
-
-        if (!points.empty() && baseline_tok_s > 0.0)
-        {
-            const SweepPoint &baseline = points[0];
-            const SweepPoint *mpvb_95_pt = &baseline;
-            const SweepPoint *mpvb_90_pt = &baseline;
-
-            for (const auto &pt : points)
-            {
-                double ratio = pt.median_tok_s / baseline_tok_s;
-                if (ratio >= 0.95) mpvb_95_pt = &pt;
-                if (ratio >= 0.90) mpvb_90_pt = &pt;
-            }
-
-            double gtx_weight_red_95 = (baseline.gtx_weights > 0) ? ((double)(baseline.gtx_weights - mpvb_95_pt->gtx_weights) / (double)baseline.gtx_weights * 100.0) : 0.0;
-            double budget_red_95 = (baseline.budget_mb > 0) ? ((double)(baseline.budget_mb - mpvb_95_pt->budget_mb) / (double)baseline.budget_mb * 100.0) : 0.0;
-            double accounted_red_95 = (baseline.accounted_peak > 0) ? ((double)(baseline.accounted_peak - mpvb_95_pt->accounted_peak) / (double)baseline.accounted_peak * 100.0) : 0.0;
-
-            fprintf(stdout, "\n--- Empirical Working Set Discovery Metrics ---\n");
-            fprintf(stdout, "  Baseline Throughput (Full GPU VRAM):  %.2f tok/s (p50: %.2f, p95: %.2f, stddev: %.2f)\n",
-                    baseline.median_tok_s, baseline.p50_tok_s, baseline.p95_tok_s, baseline.stddev_tok_s);
-            fprintf(stdout, "  Lowest Passing Budget (>= 95%% speed): %d MB\n", mpvb_95_pt->budget_mb);
-            fprintf(stdout, "  MPVB >= 95%% Cliff Bracket:           (1450, 1500] MB (Midpoint: 1475 +- 25 MB)\n");
-            fprintf(stdout, "  * Configured VRAM Budget Reduction:   %.1f%% (%d MB -> %d MB)\n", budget_red_95, baseline.budget_mb, mpvb_95_pt->budget_mb);
-            fprintf(stdout, "  * Dedicated GPU Weight Reduction:     %.1f%% (%.1f MB -> %.1f MB)\n",
-                    gtx_weight_red_95, (double)baseline.gtx_weights / (1024.0 * 1024.0), (double)mpvb_95_pt->gtx_weights / (1024.0 * 1024.0));
-            fprintf(stdout, "  * Accounted GPU Footprint Reduction:  %.1f%% (%.1f MB -> %.1f MB)\n",
-                    accounted_red_95, (double)baseline.accounted_peak / (1024.0 * 1024.0), (double)mpvb_95_pt->accounted_peak / (1024.0 * 1024.0));
-            fprintf(stdout, "  * Tracked NVIDIA ClBuffer Peak:       %.1f MB\n", (double)mpvb_95_pt->measured_opencl_peak / (1024.0 * 1024.0));
-            fprintf(stdout, "  * Throughput Preserved at MPVB_95:    %.1f%% (%.2f tok/s, stddev: %.2f)\n",
-                    mpvb_95_pt->preserved_pct, mpvb_95_pt->median_tok_s, mpvb_95_pt->stddev_tok_s);
-            fprintf(stdout, "  * Finding: No statistically meaningful throughput degradation was observed at the MPVB threshold.\n");
-            fprintf(stdout, "------------------------------------------------\n\n");
-        }
-        return 0;
+        return BenchmarkCommand::execute_sweep(opt, model, tokenizer, cl_ok ? &cl : nullptr, cl_ok, prof);
     }
 
     // Run Adaptive Planner to determine optimal tensor placement
-    size_t vram_budget = (vram_budget_mb > 0) ? (size_t)vram_budget_mb * 1024 * 1024 : (cl_ok ? cl.dev.global_mem : 0);
+    size_t vram_budget = (opt.vram_budget_mb > 0) ? (size_t)opt.vram_budget_mb * 1024 * 1024 : (cl_ok ? cl.dev.global_mem : 0);
     ExecutionPlan plan = AdaptivePlanner::generate_plan(model, prof, vram_budget, true, true);
     fprintf(stdout, "\n[Adaptive Planner] VRAM Budget: %.2f MB | Required: %.2f MB | Fully Offloaded Layers: %d/%lld\n",
             (double)vram_budget / (1024.0 * 1024.0),
@@ -505,62 +136,35 @@ int main(int argc, char **argv)
 
     // Initialize inference engine with ExecutionPlan
     InferenceEngine engine;
-    engine.enable_speculative = speculative;
-    engine.speculative_ngram = speculative_ngram;
-    engine.speculative_max_draft = speculative_draft_max;
+    engine.enable_speculative = opt.speculative;
+    engine.speculative_ngram = opt.speculative_ngram;
+    engine.speculative_max_draft = opt.speculative_draft_max;
 
-    if (!engine.init(&model, &tokenizer, cl_ok ? &cl : nullptr, max_seq_len, &plan))
+    if (!engine.init(&model, &tokenizer, cl_ok ? &cl : nullptr, opt.max_seq_len, &plan))
     {
         fprintf(stderr, "Failed to initialize inference engine\n");
         return 1;
     }
 
-    if (run_bench)
+    int ret = 0;
+    if (opt.run_bench)
     {
-        fprintf(stdout, "\n=== Running Rigorous Relic Benchmark Suite ===\n");
-        BenchmarkSuiteResult bench_res = BenchmarkSuite::run_full_suite(
-            engine, prompt, n_tokens, 3, 1, temperature, top_k);
-
-        BenchmarkSuite::print_summary(bench_res);
-        BenchmarkSuite::print_comparative_table(bench_res);
-
-        if (!bench_json_path.empty())
-        {
-            BenchmarkSuite::export_json(bench_res, bench_json_path);
-            fprintf(stdout, "Benchmark results exported to JSON: %s\n", bench_json_path.c_str());
-        }
-        if (!bench_csv_path.empty())
-        {
-            BenchmarkSuite::export_csv(bench_res, bench_csv_path);
-            fprintf(stdout, "Benchmark results exported to CSV: %s\n", bench_csv_path.c_str());
-        }
-
-        return 0;
+        ret = BenchmarkCommand::execute_standard_bench(opt, engine);
     }
-
-    if (server_mode)
+    else if (opt.server_mode)
     {
-        run_relic_server(engine, server_port, n_tokens, temperature, top_k);
-        engine.free_buffers();
-        return 0;
+        ret = ServerCommand::execute_server(opt, engine);
     }
-
-    if (interactive)
+    else if (opt.interactive)
     {
-        run_relic_interactive(engine, n_tokens, temperature, top_k);
-        engine.free_buffers();
-        return 0;
+        ret = InferenceCommand::execute_interactive(opt, engine);
     }
-
-    fprintf(stdout, "\n=== Relic Inference ===\n");
-    fprintf(stdout, "Prompt: %s\n", prompt.c_str());
-    fprintf(stdout, "Generating %d tokens...\n\n", n_tokens);
-
-    std::string result = engine.generate(prompt, n_tokens, temperature, top_k);
-
-    fprintf(stdout, "\n=== Done ===\n");
+    else
+    {
+        ret = InferenceCommand::execute_generate(opt, engine);
+    }
 
     engine.free_buffers();
     fflush(stdout);
-    return 0;
+    return ret;
 }

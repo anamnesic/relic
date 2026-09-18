@@ -74,17 +74,24 @@ struct ClMemoryTracker {
     }
 };
 
-struct ClBuffer {
+#include "backends/backend.h"
+
+struct ClBuffer : public BackendBuffer {
     cl_mem mem = nullptr;
-    size_t size = 0;
+    size_t size_bytes = 0;
     bool is_owner = true;
+    MemoryTier tier_ = MemoryTier::TIER0_DEDICATED_VRAM;
 
     ClBuffer() = default;
-    ~ClBuffer() { release(); }
+    ~ClBuffer() override { release(); }
 
-    ClBuffer(ClBuffer &&other) noexcept : mem(other.mem), size(other.size), is_owner(other.is_owner) {
+    void *raw_handle() override { return (void *)mem; }
+    size_t size() const override { return size_bytes; }
+    MemoryTier tier() const override { return tier_; }
+
+    ClBuffer(ClBuffer &&other) noexcept : mem(other.mem), size_bytes(other.size_bytes), is_owner(other.is_owner), tier_(other.tier_) {
         other.mem = nullptr;
-        other.size = 0;
+        other.size_bytes = 0;
         other.is_owner = true;
     }
 
@@ -92,10 +99,11 @@ struct ClBuffer {
         if (this != &other) {
             release();
             mem = other.mem;
-            size = other.size;
+            size_bytes = other.size_bytes;
             is_owner = other.is_owner;
+            tier_ = other.tier_;
             other.mem = nullptr;
-            other.size = 0;
+            other.size_bytes = 0;
             other.is_owner = true;
         }
         return *this;
@@ -104,15 +112,16 @@ struct ClBuffer {
     ClBuffer(const ClBuffer &) = delete;
     ClBuffer &operator=(const ClBuffer &) = delete;
 
-    static ClBuffer borrow(cl_mem m, size_t sz) {
+    static ClBuffer borrow(cl_mem m, size_t sz, MemoryTier t = MemoryTier::TIER0_DEDICATED_VRAM) {
         ClBuffer buf;
         buf.mem = m;
-        buf.size = sz;
+        buf.size_bytes = sz;
         buf.is_owner = false;
+        buf.tier_ = t;
         return buf;
     }
 
-    bool alloc(cl_context ctx, size_t bytes, cl_mem_flags flags = CL_MEM_READ_WRITE) {
+    bool alloc(cl_context ctx, size_t bytes, cl_mem_flags flags = CL_MEM_READ_WRITE, MemoryTier t = MemoryTier::TIER0_DEDICATED_VRAM) {
         release();
         if (bytes == 0) return true;
         cl_int err;
@@ -121,8 +130,9 @@ struct ClBuffer {
             fprintf(stderr, "Failed to allocate %zu bytes in OpenCL: %d\n", bytes, err);
             return false;
         }
-        size = bytes;
+        size_bytes = bytes;
         is_owner = true;
+        tier_ = t;
         ClMemoryTracker::record_alloc(bytes);
         return true;
     }
@@ -130,11 +140,11 @@ struct ClBuffer {
     void release() {
         if (mem) {
             if (is_owner) {
-                ClMemoryTracker::record_free(size);
+                ClMemoryTracker::record_free(size_bytes);
                 clReleaseMemObject(mem);
             }
             mem = nullptr;
-            size = 0;
+            size_bytes = 0;
             is_owner = true;
         }
     }
@@ -175,16 +185,40 @@ struct ClKernel {
     }
 };
 
-class OpenClBackend {
+class OpenClBackend : public Backend {
 public:
     ClDevice dev;
     bool initialized = false;
+
+    ~OpenClBackend() override { shutdown(); }
+
+    const std::string &name() const override { return dev.name; }
+    BackendDeviceType type() const override { return BackendDeviceType::NVIDIA_GPU; }
+    bool initialize() override { return init(); }
+    DeviceStats query_stats() override;
 
     static void list_devices();
     bool init(int platform_idx = -1, int device_idx = 0);
     void shutdown();
 
     bool build_kernel(ClKernel &k, const char *source, const char *kname, const char *opts = "");
+
+    // Memory operations
+    std::unique_ptr<BackendBuffer> allocate(size_t bytes, MemoryTier tier = MemoryTier::TIER0_DEDICATED_VRAM) override;
+    bool upload(BackendBuffer &dst, const void *host_src, size_t bytes, bool async = false) override;
+    bool download(void *host_dst, const BackendBuffer &src, size_t bytes, bool async = false) override;
+    bool copy(BackendBuffer &dst, const BackendBuffer &src, size_t bytes) override;
+    void synchronize() override;
+
+    // Backend abstract compute primitives
+    void rms_norm(BackendBuffer &out, BackendBuffer &x, BackendBuffer &weight, int64_t n, float eps = 1e-6f) override;
+    void add_rms_norm(BackendBuffer &residual, BackendBuffer &branch, BackendBuffer &weight, BackendBuffer &norm_out, int64_t n, float eps = 1e-6f) override;
+    void gemv_q4_0(BackendBuffer &dst, BackendBuffer &a, BackendBuffer &b, int64_t N, int64_t K) override;
+    void gemv_q8_0(BackendBuffer &dst, BackendBuffer &a, BackendBuffer &b, int64_t N, int64_t K) override;
+    void gemv_q4_0_fused_ffn(BackendBuffer &dst, BackendBuffer &a, BackendBuffer &gate, BackendBuffer &up, int64_t N, int64_t K) override;
+    void rope(BackendBuffer &x, int64_t n_embd, int64_t n_head, int64_t pos, int64_t n_tokens) override;
+    void embed_lookup_q4_0(BackendBuffer &hidden, BackendBuffer &embd_table, int token_id, int64_t n_embd) override;
+    void argmax(BackendBuffer &out_idx, BackendBuffer &logits, int64_t n) override;
 
     // High-performance GEMV and fused kernels
     void gemv_f32_nt(ClBuffer &dst, ClBuffer &a, ClBuffer &b, int64_t N, int64_t K);

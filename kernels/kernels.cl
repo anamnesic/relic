@@ -523,21 +523,50 @@ kernel void gemv_q4_0_ffn_swiglu(
             qs_up[r] = bu + 2;
         }
 
-        for (int i = 0; i < 4; i++) {
-            float4 a_lo = (K <= 2048) ? vload4(i, la_blk) : vload4(i, ga_blk);
-            float4 a_hi = (K <= 2048) ? vload4(i + 4, la_blk) : vload4(i + 4, ga_blk);
+        float block_acc_gate[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        float block_acc_up[8]   = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 
-            for (int r = 0; r < 8; r++) {
-                uchar4 qb_g = vload4(i, qs_gate[r]);
-                float4 vg_lo = (convert_float4(qb_g & (uchar4)0x0F) - (float4)8.0f) * d_gate[r];
-                float4 vg_hi = (convert_float4(qb_g >> (uchar4)4)   - (float4)8.0f) * d_gate[r];
-                sum_gate[r] += dot(a_lo, vg_lo) + dot(a_hi, vg_hi);
+        if (K <= 2048) {
+            local const float *a_blk = l_a + blk * 32;
+            for (int i = 0; i < 4; i++) {
+                float4 a_lo = vload4(i, a_blk);
+                float4 a_hi = vload4(i + 4, a_blk);
 
-                uchar4 qb_u = vload4(i, qs_up[r]);
-                float4 vu_lo = (convert_float4(qb_u & (uchar4)0x0F) - (float4)8.0f) * d_up[r];
-                float4 vu_hi = (convert_float4(qb_u >> (uchar4)4)   - (float4)8.0f) * d_up[r];
-                sum_up[r] += dot(a_lo, vu_lo) + dot(a_hi, vu_hi);
+                for (int r = 0; r < 8; r++) {
+                    uchar4 qb_g = vload4(i, qs_gate[r]);
+                    float4 vg_lo = convert_float4(qb_g & (uchar4)0x0F) - (float4)8.0f;
+                    float4 vg_hi = convert_float4(qb_g >> (uchar4)4)   - (float4)8.0f;
+                    block_acc_gate[r] += dot(a_lo, vg_lo) + dot(a_hi, vg_hi);
+
+                    uchar4 qb_u = vload4(i, qs_up[r]);
+                    float4 vu_lo = convert_float4(qb_u & (uchar4)0x0F) - (float4)8.0f;
+                    float4 vu_hi = convert_float4(qb_u >> (uchar4)4)   - (float4)8.0f;
+                    block_acc_up[r] += dot(a_lo, vu_lo) + dot(a_hi, vu_hi);
+                }
             }
+        } else {
+            global const float *a_blk = a + blk * 32;
+            for (int i = 0; i < 4; i++) {
+                float4 a_lo = vload4(i, a_blk);
+                float4 a_hi = vload4(i + 4, a_blk);
+
+                for (int r = 0; r < 8; r++) {
+                    uchar4 qb_g = vload4(i, qs_gate[r]);
+                    float4 vg_lo = convert_float4(qb_g & (uchar4)0x0F) - (float4)8.0f;
+                    float4 vg_hi = convert_float4(qb_g >> (uchar4)4)   - (float4)8.0f;
+                    block_acc_gate[r] += dot(a_lo, vg_lo) + dot(a_hi, vg_hi);
+
+                    uchar4 qb_u = vload4(i, qs_up[r]);
+                    float4 vu_lo = convert_float4(qb_u & (uchar4)0x0F) - (float4)8.0f;
+                    float4 vu_hi = convert_float4(qb_u >> (uchar4)4)   - (float4)8.0f;
+                    block_acc_up[r] += dot(a_lo, vu_lo) + dot(a_hi, vu_hi);
+                }
+            }
+        }
+
+        for (int r = 0; r < 8; r++) {
+            sum_gate[r] += block_acc_gate[r] * d_gate[r];
+            sum_up[r]   += block_acc_up[r]   * d_up[r];
         }
     }
 

@@ -280,25 +280,24 @@ int Qwen35DecoderAdapter::forward(const LlamaModel &model, int token_id, int64_t
             clEnqueueWriteBuffer(cl->dev.queue, gpu_hidden.mem, CL_FALSE, 0, (size_t)(n_embd * sizeof(float)), hidden, 0, nullptr, nullptr);
         }
 
+        // Initialize residual stream and pre-normalize for Layer 0
+        cl->copy(gpu_residual, gpu_hidden, n_embd);
+        std::string l0_norm_name = "blk.0.attn_norm.weight";
+        ClBuffer *l0_norm_buf = weights_mgr->get_tensor_buffer(l0_norm_name);
+        if (!l0_norm_buf)
+        {
+            l0_norm_name = "blk.0.norm.weight";
+            l0_norm_buf = weights_mgr->get_tensor_buffer(l0_norm_name);
+        }
+        if (l0_norm_buf)
+        {
+            cl->rms_norm(gpu_hidden, gpu_hidden, *l0_norm_buf, n_embd, 1);
+        }
+
         for (int64_t layer = 0; layer < arch.n_layer; layer++)
         {
-            std::string prefix = "blk." + std::to_string(layer) + ".";
             bool is_full_attn = (arch.full_attention_interval > 0) &&
                                 ((layer + 1) % arch.full_attention_interval == 0);
-
-            cl->copy(gpu_residual, gpu_hidden, n_embd);
-
-            std::string norm_name = prefix + "attn_norm.weight";
-            ClBuffer *attn_norm_buf = weights_mgr->get_tensor_buffer(norm_name);
-            if (!attn_norm_buf)
-            {
-                norm_name = prefix + "norm.weight";
-                attn_norm_buf = weights_mgr->get_tensor_buffer(norm_name);
-            }
-            if (attn_norm_buf)
-            {
-                cl->rms_norm(gpu_hidden, gpu_hidden, *attn_norm_buf, n_embd, 1);
-            }
 
             if (is_full_attn)
             {
@@ -319,17 +318,36 @@ int Qwen35DecoderAdapter::forward(const LlamaModel &model, int token_id, int64_t
                                          total_qkv, key_dim, qk_dim, linear_inner, value_heads);
             }
 
-            mlp_block->forward(layer, arch, model, gpu_hidden, gpu_residual,
+            // mlp_block internally fuses: residual += attn_out, hidden = rms_norm(residual, ffn_norm)
+            // and computes down-projection into gpu_attn_out
+            mlp_block->forward(layer, arch, model, gpu_hidden, gpu_residual, gpu_attn_out,
                                gpu_ffn_act, gpu_gate, gpu_up);
-        }
 
-        // Final RMSNorm
-        ClBuffer *out_norm_buf = weights_mgr->get_tensor_buffer("output_norm.weight");
-        if (!out_norm_buf)
-            out_norm_buf = weights_mgr->get_tensor_buffer("norm.weight");
-        if (out_norm_buf)
-        {
-            cl->rms_norm(gpu_hidden, gpu_hidden, *out_norm_buf, n_embd, 1);
+            // Inter-layer fused transition: residual += ffn_down, hidden = rms_norm(residual, next_norm)
+            ClBuffer *next_norm_buf = nullptr;
+            if (layer + 1 < arch.n_layer)
+            {
+                std::string next_prefix = "blk." + std::to_string(layer + 1) + ".";
+                next_norm_buf = weights_mgr->get_tensor_buffer(next_prefix + "attn_norm.weight");
+                if (!next_norm_buf)
+                    next_norm_buf = weights_mgr->get_tensor_buffer(next_prefix + "norm.weight");
+            }
+            else
+            {
+                next_norm_buf = weights_mgr->get_tensor_buffer("output_norm.weight");
+                if (!next_norm_buf)
+                    next_norm_buf = weights_mgr->get_tensor_buffer("norm.weight");
+            }
+
+            if (next_norm_buf)
+            {
+                cl->add_rms_norm(gpu_residual, gpu_attn_out, *next_norm_buf, gpu_hidden, n_embd, arch.norm_eps);
+            }
+            else
+            {
+                cl->add(gpu_residual, gpu_residual, gpu_attn_out, n_embd);
+                cl->copy(gpu_hidden, gpu_residual, n_embd);
+            }
         }
 
         // Output logits projection

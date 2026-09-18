@@ -72,5 +72,5 @@ void Qwen35AttentionBlock::forward(int64_t layer, int64_t position, int64_t seq_
         cl_->copy(gpu_attn_out, gpu_gate, n_embd);
     }
 
-    cl_->add(gpu_hidden, gpu_residual, gpu_attn_out, n_embd);
+    // Attention branch output is now in gpu_attn_out, ready for fused add_rms_norm
 }

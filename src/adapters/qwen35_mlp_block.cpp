@@ -6,14 +6,12 @@ Qwen35MlpBlock::Qwen35MlpBlock(OpenClBackend *backend, Qwen35WeightsManager *wei
 }
 
 void Qwen35MlpBlock::forward(int64_t layer, const ArchitectureSpec &arch, const LlamaModel &model,
-                             ClBuffer &gpu_hidden, ClBuffer &gpu_residual,
+                             ClBuffer &gpu_hidden, ClBuffer &gpu_residual, ClBuffer &gpu_attn_out,
                              ClBuffer &gpu_ffn_act, ClBuffer &gpu_gate, ClBuffer &gpu_up)
 {
     int64_t n_embd = arch.n_embd;
     int64_t n_ff = arch.n_ff;
     std::string prefix = "blk." + std::to_string(layer) + ".";
-
-    cl_->copy(gpu_residual, gpu_hidden, n_embd);
 
     std::string ffn_norm_name = prefix + "ffn_norm.weight";
     ClBuffer *ffn_norm_buf = weights_mgr_->get_tensor_buffer(ffn_norm_name);
@@ -24,7 +22,12 @@ void Qwen35MlpBlock::forward(int64_t layer, const ArchitectureSpec &arch, const 
     }
     if (ffn_norm_buf)
     {
-        cl_->rms_norm(gpu_hidden, gpu_hidden, *ffn_norm_buf, n_embd, 1);
+        cl_->add_rms_norm(gpu_residual, gpu_attn_out, *ffn_norm_buf, gpu_hidden, n_embd, arch.norm_eps);
+    }
+    else
+    {
+        cl_->add(gpu_residual, gpu_residual, gpu_attn_out, n_embd);
+        cl_->copy(gpu_hidden, gpu_residual, n_embd);
     }
 
     auto w_gate = model.tensors.find(prefix + "ffn_gate.weight");
@@ -49,8 +52,7 @@ void Qwen35MlpBlock::forward(int64_t layer, const ArchitectureSpec &arch, const 
         auto w_down = model.tensors.find(prefix + "ffn_down.weight");
         if (w_down != model.tensors.end())
         {
-            weights_mgr_->dispatch_gemv(gpu_hidden, gpu_ffn_act, prefix + "ffn_down.weight", w_down->second, n_embd, n_ff, layer);
+            weights_mgr_->dispatch_gemv(gpu_attn_out, gpu_ffn_act, prefix + "ffn_down.weight", w_down->second, n_embd, n_ff, layer);
         }
-        cl_->add(gpu_hidden, gpu_residual, gpu_hidden, n_embd);
     }
 }

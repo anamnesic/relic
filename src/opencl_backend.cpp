@@ -860,3 +860,143 @@ void OpenClBackend::embed_lookup(ClBuffer &hidden, ClBuffer &embd_table, int tok
     }
     CL_CHECK_VOID(clEnqueueNDRangeKernel(dev.queue, knl.kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr), "embed_lookup_q4_0");
 }
+
+DeviceStats OpenClBackend::query_stats()
+{
+    DeviceStats st;
+    st.device_name = dev.name;
+    st.type = BackendDeviceType::NVIDIA_GPU;
+    st.total_memory_bytes = dev.global_mem;
+    st.free_memory_bytes = dev.global_mem;
+    st.max_alloc_bytes = dev.max_alloc;
+    st.compute_units = (int)dev.compute_units;
+    st.memory_bandwidth_gbs = 128.0;
+    st.dma_transfer_bandwidth_gbs = 6.5;
+    st.tflops_fp32 = 2.1;
+    st.profile.device_name = dev.name;
+    st.profile.type = BackendDeviceType::NVIDIA_GPU;
+    st.profile.total_memory_bytes = dev.global_mem;
+    st.profile.free_memory_bytes = dev.global_mem;
+    st.profile.max_alloc_bytes = dev.max_alloc;
+    st.profile.compute_units = (int)dev.compute_units;
+    st.profile.fp16_supported = dev.fp16;
+    st.profile.max_workgroup_size = dev.max_wg_size > 0 ? dev.max_wg_size : 256;
+    st.profile.memory_bandwidth_gbs = 128.0;
+    st.profile.dma_transfer_bandwidth_gbs = 6.5;
+    st.profile.tflops_fp32 = 2.1;
+    return st;
+}
+
+std::unique_ptr<BackendBuffer> OpenClBackend::allocate(size_t bytes, MemoryTier tier)
+{
+    if (!initialized || bytes == 0)
+        return nullptr;
+
+    auto buf = std::make_unique<ClBuffer>();
+    cl_mem_flags flags = CL_MEM_READ_WRITE;
+    if (tier == MemoryTier::TIER2_HOST_PINNED_RAM)
+    {
+        flags |= CL_MEM_ALLOC_HOST_PTR;
+    }
+    if (!buf->alloc(dev.context, bytes, flags, tier))
+        return nullptr;
+
+    return buf;
+}
+
+bool OpenClBackend::upload(BackendBuffer &dst, const void *host_src, size_t bytes, bool async)
+{
+    if (!initialized || !host_src || bytes == 0)
+        return false;
+    cl_int err = clEnqueueWriteBuffer(dev.queue, (cl_mem)dst.raw_handle(), async ? CL_FALSE : CL_TRUE,
+                                      0, bytes, host_src, 0, nullptr, nullptr);
+    return (err == CL_SUCCESS);
+}
+
+bool OpenClBackend::download(void *host_dst, const BackendBuffer &src, size_t bytes, bool async)
+{
+    if (!initialized || !host_dst || bytes == 0)
+        return false;
+    cl_int err = clEnqueueReadBuffer(dev.queue, (cl_mem)const_cast<BackendBuffer &>(src).raw_handle(),
+                                     async ? CL_FALSE : CL_TRUE, 0, bytes, host_dst, 0, nullptr, nullptr);
+    return (err == CL_SUCCESS);
+}
+
+bool OpenClBackend::copy(BackendBuffer &dst, const BackendBuffer &src, size_t bytes)
+{
+    if (!initialized || bytes == 0)
+        return false;
+    cl_int err = clEnqueueCopyBuffer(dev.queue, (cl_mem)const_cast<BackendBuffer &>(src).raw_handle(),
+                                     (cl_mem)dst.raw_handle(), 0, 0, bytes, 0, nullptr, nullptr);
+    return (err == CL_SUCCESS);
+}
+
+void OpenClBackend::synchronize()
+{
+    if (initialized && dev.queue)
+        clFinish(dev.queue);
+}
+
+void OpenClBackend::rms_norm(BackendBuffer &out, BackendBuffer &x, BackendBuffer &weight, int64_t n, float eps)
+{
+    (void)eps;
+    ClBuffer b_out = ClBuffer::borrow((cl_mem)out.raw_handle(), out.size());
+    ClBuffer b_x   = ClBuffer::borrow((cl_mem)x.raw_handle(), x.size());
+    ClBuffer b_w   = ClBuffer::borrow((cl_mem)weight.raw_handle(), weight.size());
+    rms_norm(b_out, b_x, b_w, n, 1);
+}
+
+void OpenClBackend::add_rms_norm(BackendBuffer &residual, BackendBuffer &branch, BackendBuffer &weight, BackendBuffer &norm_out, int64_t n, float eps)
+{
+    ClBuffer b_res = ClBuffer::borrow((cl_mem)residual.raw_handle(), residual.size());
+    ClBuffer b_bra = ClBuffer::borrow((cl_mem)branch.raw_handle(), branch.size());
+    ClBuffer b_w   = ClBuffer::borrow((cl_mem)weight.raw_handle(), weight.size());
+    ClBuffer b_out = ClBuffer::borrow((cl_mem)norm_out.raw_handle(), norm_out.size());
+    add_rms_norm(b_res, b_bra, b_w, b_out, n, eps);
+}
+
+void OpenClBackend::gemv_q4_0(BackendBuffer &dst, BackendBuffer &a, BackendBuffer &b, int64_t N, int64_t K)
+{
+    ClBuffer b_dst = ClBuffer::borrow((cl_mem)dst.raw_handle(), dst.size());
+    ClBuffer b_a   = ClBuffer::borrow((cl_mem)a.raw_handle(), a.size());
+    ClBuffer b_b   = ClBuffer::borrow((cl_mem)b.raw_handle(), b.size());
+    gemv_q4_0(b_dst, b_a, b_b, N, K);
+}
+
+void OpenClBackend::gemv_q8_0(BackendBuffer &dst, BackendBuffer &a, BackendBuffer &b, int64_t N, int64_t K)
+{
+    ClBuffer b_dst = ClBuffer::borrow((cl_mem)dst.raw_handle(), dst.size());
+    ClBuffer b_a   = ClBuffer::borrow((cl_mem)a.raw_handle(), a.size());
+    ClBuffer b_b   = ClBuffer::borrow((cl_mem)b.raw_handle(), b.size());
+    gemv_q8_0(b_dst, b_a, b_b, N, K);
+}
+
+void OpenClBackend::gemv_q4_0_fused_ffn(BackendBuffer &dst, BackendBuffer &a, BackendBuffer &gate, BackendBuffer &up, int64_t N, int64_t K)
+{
+    ClBuffer b_dst  = ClBuffer::borrow((cl_mem)dst.raw_handle(), dst.size());
+    ClBuffer b_a    = ClBuffer::borrow((cl_mem)a.raw_handle(), a.size());
+    ClBuffer b_gate = ClBuffer::borrow((cl_mem)gate.raw_handle(), gate.size());
+    ClBuffer b_up   = ClBuffer::borrow((cl_mem)up.raw_handle(), up.size());
+    gemv_q4_0_ffn_swiglu(b_dst, b_a, b_gate, b_up, N, K);
+}
+
+void OpenClBackend::rope(BackendBuffer &x, int64_t n_embd, int64_t n_head, int64_t pos, int64_t n_tokens)
+{
+    ClBuffer b_x = ClBuffer::borrow((cl_mem)x.raw_handle(), x.size());
+    rope(b_x, n_embd, n_head, pos, n_tokens);
+}
+
+void OpenClBackend::embed_lookup_q4_0(BackendBuffer &hidden, BackendBuffer &embd_table, int token_id, int64_t n_embd)
+{
+    ClBuffer b_hid = ClBuffer::borrow((cl_mem)hidden.raw_handle(), hidden.size());
+    ClBuffer b_emb = ClBuffer::borrow((cl_mem)embd_table.raw_handle(), embd_table.size());
+    embed_lookup(b_hid, b_emb, token_id, n_embd);
+}
+
+void OpenClBackend::argmax(BackendBuffer &out_idx, BackendBuffer &logits, int64_t n)
+{
+    ClBuffer b_idx = ClBuffer::borrow((cl_mem)out_idx.raw_handle(), out_idx.size());
+    ClBuffer b_log = ClBuffer::borrow((cl_mem)logits.raw_handle(), logits.size());
+    argmax(b_idx, b_log, n);
+}
+

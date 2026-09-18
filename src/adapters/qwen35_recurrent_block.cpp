@@ -75,5 +75,5 @@ void Qwen35RecurrentBlock::forward(int64_t layer, const ArchitectureSpec &arch, 
         cl_->copy(gpu_attn_out, gpu_delta_out, std::min(n_embd, linear_inner));
     }
 
-    cl_->add(gpu_hidden, gpu_residual, gpu_attn_out, n_embd);
+    // Recurrent branch output is now in gpu_attn_out, ready for fused add_rms_norm
 }

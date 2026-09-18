@@ -181,7 +181,7 @@
 
 ---
 
-### 🏛️ Phase 5: Hexagonal Architecture & Deep Refactoring (In Progress)
+### 🏛️ Phase 5: Hexagonal Architecture & Deep Refactoring
 - [x] **1. InferenceEngine Dependency Inversion & Pure Domain Decoupling**:
   - [x] Remove `#include "opencl_backend.h"` from `src/inference.h`.
   - [x] Inject `std::unique_ptr<ArchitectureDecoder>` directly into `InferenceEngine` or provide an abstract `IDecoderFactory`.
@@ -196,20 +196,28 @@
   - [x] Extract `Qwen35RecurrentBlock` (`src/adapters/qwen35_recurrent_block.{h,cpp}`): Gated DeltaNet SSM Conv1d and recurrent state steps.
   - [x] Extract `Qwen35AttentionBlock` (`src/adapters/qwen35_attention_block.{h,cpp}`): Full self-attention, RoPE, KV cache append, and scaled dot-product.
   - [x] Extract `Qwen35MlpBlock` (`src/adapters/qwen35_mlp_block.{h,cpp}`): SwiGLU FFN gating and down-projection.
-- [ ] **4. Unified Backend Device Interface**:
-  - [ ] Align `OpenClBackend` with `Backend` interface from `src/backends/backend.h`.
-  - [ ] Unify `ClBuffer` under `BackendBuffer`.
+- [x] **4. Unified Backend Device Interface**:
+  - [x] Align `OpenClBackend` with `Backend` interface from `src/backends/backend.h`.
+  - [x] Unify `ClBuffer` under `BackendBuffer`.
 - [x] **5. Ubiquitous Domain Language**:
   - [x] Introduce `using NeuralModel = LlamaModel;` domain abstraction.
+- [x] **6. Driving CLI Command Controllers (`src/cli/`)**:
+  - [x] Extract CLI sub-commands from `src/main.cpp` into dedicated command adapters (`CliOptions`, `BenchmarkCommand`, `InferenceCommand`, `ServerCommand`).
+  - [x] Reduce `src/main.cpp` to a clean ~180-line application bootstrap.
 
 ---
 
 ### 🚀 Phase 6: Performance Engineering & Memory Bandwidth Saturation (Target: 35–60 tok/s)
-- [ ] **1. Vectorized 128-Bit Memory Transactions in GEMV Q4_0**:
+- [x] **1. FFN SwiGLU Scale Factorization**:
+  - [x] Factor `d_gate[r]` and `d_up[r]` out of inner loops in `gemv_q4_0_ffn_swiglu`, saving 512 FP multiplications per block per thread.
+- [x] **2. Intra-Layer Kernel Fusion**:
+  - [x] Fuse Residual Add + RMSNorm into `add_rms_norm` across Attention $\to$ FFN, FFN $\to$ Next Layer, and Final Layer $\to$ Logits.
+  - [x] Eliminate 95 kernel launches and global memory round-trips per token across 24 layers.
+- [ ] **3. Vectorized 128-Bit Memory Transactions in GEMV Q4_0**:
   - [ ] Implement 128-bit (`uint4` / `vload4`) aligned block reads in `gemv_q4_0` and `gemv_q4_0_ffn_swiglu`.
   - [ ] Minimize register pressure and memory pipeline stalls on NVIDIA Turing SM 75 architecture.
-- [ ] **2. Intra-Layer Kernel Fusion**:
-  - [ ] Fuse Residual Add + RMSNorm into a single dispatch.
+- [ ] **4. Constant Dot-Product Bias Precomputation**:
+  - [ ] Precompute $S_a = \sum_{k=0}^{31} a_k$ per block to eliminate per-element $-8.0\text{f}$ subtraction in GEMV dot products.
 
 ---
 
