@@ -53,7 +53,11 @@ void Qwen35WeightsManager::ensure_weights_uploaded(const LlamaModel &model)
     size_t total_original = 0;
     size_t total_offloaded_to_host = 0;
 
-    // 1. Fuse QKV and Gate weights for recurrent layers
+    // 1. Fuse recurrent projections that share the same input activation.
+    // Alpha/beta are deliberately included when their layout is compatible:
+    // this removes two tiny GEMV launches and two redundant activation-cache
+    // fills from every recurrent layer. Models with different tensor types or
+    // shapes retain the QKV+gate-only and independent alpha/beta paths.
     for (int64_t l = 0; l < arch_.n_layer; l++)
     {
         bool is_full_attn = (arch_.full_attention_interval > 0) &&
@@ -63,20 +67,38 @@ void Qwen35WeightsManager::ensure_weights_uploaded(const LlamaModel &model)
         std::string prefix = "blk." + std::to_string(l) + ".";
         auto it_qkv = model.tensors.find(prefix + "attn_qkv.weight");
         auto it_gate = model.tensors.find(prefix + "attn_gate.weight");
+        auto it_alpha = model.tensors.find(prefix + "ssm_alpha.weight");
+        auto it_beta = model.tensors.find(prefix + "ssm_beta.weight");
         if (it_qkv != model.tensors.end() && it_gate != model.tensors.end())
         {
             const auto &t_qkv = it_qkv->second;
             const auto &t_gate = it_gate->second;
             if (t_qkv.type == t_gate.type)
             {
+                const bool fuse_alpha_beta =
+                    it_alpha != model.tensors.end() && it_beta != model.tensors.end() &&
+                    it_alpha->second.type == t_qkv.type && it_beta->second.type == t_qkv.type &&
+                    it_alpha->second.nelements() == arch_.linear_value_heads * arch_.n_embd &&
+                    it_beta->second.nelements() == arch_.linear_value_heads * arch_.n_embd;
+
                 std::vector<uint8_t> fused_data;
-                fused_data.reserve(t_qkv.data.size() + t_gate.data.size());
+                size_t fused_bytes = t_qkv.data.size() + t_gate.data.size();
+                if (fuse_alpha_beta)
+                    fused_bytes += it_alpha->second.data.size() + it_beta->second.data.size();
+                fused_data.reserve(fused_bytes);
                 fused_data.insert(fused_data.end(), t_qkv.data.begin(), t_qkv.data.end());
                 fused_data.insert(fused_data.end(), t_gate.data.begin(), t_gate.data.end());
 
                 int64_t total_elems = t_qkv.nelements() + t_gate.nelements();
-                size_t uploaded_bytes = 0;
                 std::string fused_name = prefix + "attn_qkv_gate.weight";
+                if (fuse_alpha_beta)
+                {
+                    fused_data.insert(fused_data.end(), it_alpha->second.data.begin(), it_alpha->second.data.end());
+                    fused_data.insert(fused_data.end(), it_beta->second.data.begin(), it_beta->second.data.end());
+                    total_elems += it_alpha->second.nelements() + it_beta->second.nelements();
+                    fused_name = prefix + "attn_qkv_gate_alpha_beta.weight";
+                }
+                size_t uploaded_bytes = 0;
                 if (gpu_store_.upload_auto_q4(cl_->dev.context, cl_->dev.queue, fused_name,
                                              fused_data.data(), fused_data.size(), t_qkv.type,
                                              total_elems, uploaded_bytes))
@@ -98,8 +120,11 @@ void Qwen35WeightsManager::ensure_weights_uploaded(const LlamaModel &model)
             if (dot_pos != std::string::npos)
             {
                 std::string prefix = kv.first.substr(0, dot_pos + 1);
-                if ((kv.first == prefix + "attn_qkv.weight" || kv.first == prefix + "attn_gate.weight") &&
-                    gpu_store_.get(prefix + "attn_qkv_gate.weight") != nullptr)
+                const bool has_full_fusion = gpu_store_.get(prefix + "attn_qkv_gate_alpha_beta.weight") != nullptr;
+                const bool has_base_fusion = has_full_fusion || gpu_store_.get(prefix + "attn_qkv_gate.weight") != nullptr;
+                const bool is_base_projection = kv.first == prefix + "attn_qkv.weight" || kv.first == prefix + "attn_gate.weight";
+                const bool is_scalar_projection = kv.first == prefix + "ssm_alpha.weight" || kv.first == prefix + "ssm_beta.weight";
+                if ((is_base_projection && has_base_fusion) || (is_scalar_projection && has_full_fusion))
                 {
                     continue; // Already resident in fused GPU VRAM buffer
                 }

@@ -25,14 +25,30 @@ void Qwen35RecurrentBlock::forward(int64_t layer, const ArchitectureSpec &arch, 
     if (w_O == model.tensors.end())
         w_O = model.tensors.find(prefix + "attn_output.weight");
 
-    std::string fused_name = prefix + "attn_qkv_gate.weight";
+    std::string fused_name = prefix + "attn_qkv_gate_alpha_beta.weight";
     ClBuffer *fused_w = weights_mgr_->get_tensor_buffer(fused_name);
+    const bool alpha_beta_fused = fused_w != nullptr;
+    if (!fused_w)
+    {
+        fused_name = prefix + "attn_qkv_gate.weight";
+        fused_w = weights_mgr_->get_tensor_buffer(fused_name);
+    }
     if (fused_w)
     {
-        cl_->gemv_q4_0(gpu_conv_in, gpu_hidden, *fused_w, total_qkv + linear_inner, n_embd);
+        const int64_t fused_rows = total_qkv + linear_inner + (alpha_beta_fused ? 2 * value_heads : 0);
+        cl_->gemv_q4_0(gpu_conv_in, gpu_hidden, *fused_w, fused_rows, n_embd);
         clEnqueueCopyBuffer(cl_->dev.queue, gpu_conv_in.mem, gpu_gate.mem,
                             (size_t)(total_qkv * sizeof(float)), 0,
                             (size_t)(linear_inner * sizeof(float)), 0, nullptr, nullptr);
+        if (alpha_beta_fused)
+        {
+            const size_t alpha_offset = (size_t)(total_qkv + linear_inner) * sizeof(float);
+            const size_t beta_offset = alpha_offset + (size_t)value_heads * sizeof(float);
+            clEnqueueCopyBuffer(cl_->dev.queue, gpu_conv_in.mem, gpu_alpha.mem,
+                                alpha_offset, 0, (size_t)value_heads * sizeof(float), 0, nullptr, nullptr);
+            clEnqueueCopyBuffer(cl_->dev.queue, gpu_conv_in.mem, gpu_beta.mem,
+                                beta_offset, 0, (size_t)value_heads * sizeof(float), 0, nullptr, nullptr);
+        }
     }
     else
     {
@@ -46,11 +62,11 @@ void Qwen35RecurrentBlock::forward(int64_t layer, const ArchitectureSpec &arch, 
             weights_mgr_->dispatch_gemv(gpu_gate, gpu_hidden, prefix + "attn_gate.weight", w_gate->second, linear_inner, n_embd, layer);
         }
     }
-    if (w_alpha != model.tensors.end())
+    if (!alpha_beta_fused && w_alpha != model.tensors.end())
     {
         weights_mgr_->dispatch_gemv(gpu_alpha, gpu_hidden, prefix + "ssm_alpha.weight", w_alpha->second, value_heads, n_embd, layer);
     }
-    if (w_beta != model.tensors.end())
+    if (!alpha_beta_fused && w_beta != model.tensors.end())
     {
         weights_mgr_->dispatch_gemv(gpu_beta, gpu_hidden, prefix + "ssm_beta.weight", w_beta->second, value_heads, n_embd, layer);
     }

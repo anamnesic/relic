@@ -57,7 +57,9 @@ bool Qwen35DecoderAdapter::init(const ArchitectureSpec &spec, int64_t max_seq_le
         gpu_gate.alloc(cl->dev.context, (size_t)n_ff * sizeof(float));
         gpu_up.alloc(cl->dev.context, (size_t)n_ff * sizeof(float));
         gpu_ffn_act.alloc(cl->dev.context, (size_t)n_ff * sizeof(float));
-        gpu_conv_in.alloc(cl->dev.context, (size_t)(total_qkv + linear_inner) * sizeof(float));
+        // Also holds fused recurrent alpha/beta projection outputs when their
+        // weight layout permits the single-pass path.
+        gpu_conv_in.alloc(cl->dev.context, (size_t)(total_qkv + linear_inner + 2 * arch.linear_value_heads) * sizeof(float));
         gpu_conv_out.alloc(cl->dev.context, (size_t)total_qkv * sizeof(float));
         gpu_delta_out.alloc(cl->dev.context, (size_t)linear_inner * sizeof(float));
         gpu_q_full.alloc(cl->dev.context, (size_t)(2 * q_size) * sizeof(float));
