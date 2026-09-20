@@ -17,6 +17,7 @@ struct InferenceEngine
     NeuralModel *model = nullptr;
     Tokenizer *tokenizer = nullptr;
     const ExecutionPlan *plan = nullptr;
+    OpenClBackend *opencl_backend = nullptr; // non-owning, used for runtime metadata
     std::unique_ptr<ArchitectureDecoder> decoder;
     int64_t max_seq_len = 2048;
     int64_t n_past = 0;

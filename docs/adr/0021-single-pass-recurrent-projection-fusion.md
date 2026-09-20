@@ -53,21 +53,23 @@ decoded token. It also avoids loading the hidden activation into local memory
 twice per recurrent layer. The dot products and quantized weight bytes remain
 unchanged, preserving numerical behavior.
 
-This is a latency optimization rather than a claim of a new measured token
-rate. The development host exposes only a PoCL CPU device and cannot reproduce
-the GTX 1650 benchmark environment. A statistically comparable GPU run is
-required before recording a new tok/s milestone.
+The change was subsequently measured on the target GTX 1650 using the same
+Qwen 3.5 2B GGUF and the benchmark suite's three measured runs after one
+warmup. Median decode increased from the ADR 0019 baseline of 15.47 tok/s to
+16.797 tok/s, an 8.58% improvement. The verification rerun measured 16.813,
+16.797, and 16.797 tok/s with a standard deviation of 0.009 tok/s.
 
 ## Verification
 
 - The complete CMake build succeeds for `relic`, `relic_test`, and
   `relic_dump_model`.
 - `git diff --check` reports no whitespace errors.
-- The local `relic_test` executable cannot complete on the available PoCL CPU:
-  the monolithic OpenCL program uses FP16 kernels unsupported by that device,
-  kernel creation fails, and the pre-existing test harness later exits with a
-  segmentation fault. This environment limitation prevents numerical and
-  performance claims for the new GPU path.
+- End-to-end GTX 1650 benchmark: 16.797 tok/s median decode and 17.048 tok/s
+  median prompt ingestion for 16 generated tokens.
+- The benchmark kept 1,676.71 MB of model weights resident in VRAM and reported
+  no PCIe logit readback time.
+- The CPU-only PoCL test path remains unsuitable for GPU numerical validation;
+  GTX execution and the CUDA microbenchmark provide the target-device checks.
 
 ## Consequences
 

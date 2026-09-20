@@ -29,6 +29,7 @@
 
 # CMake / Build directories
 build/
+build-cuda*/
 CMakeCache.txt
 CMakeFiles/
 CMakeScripts/

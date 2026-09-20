@@ -44,7 +44,9 @@ bool InferenceEngine::init(NeuralModel *m, Tokenizer *tok, OpenClBackend *backen
                 m->architecture.name.c_str());
         return false;
     }
-    return init(m, tok, std::move(dec), max_seq_limit, exec_plan);
+    const bool initialized = init(m, tok, std::move(dec), max_seq_limit, exec_plan);
+    if (initialized) opencl_backend = backend;
+    return initialized;
 }
 
 void InferenceEngine::free_buffers()

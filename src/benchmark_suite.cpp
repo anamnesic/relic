@@ -1,4 +1,5 @@
 #include "benchmark_suite.h"
+#include "opencl_backend.h"
 #include "sampler.h"
 #include <chrono>
 #include <algorithm>
@@ -54,7 +55,17 @@ BenchmarkSuiteResult BenchmarkSuite::run_full_suite(
         result.metadata.quantization = "Q4_0";
     }
 
-    if (!prof.devices.empty())
+    if (engine.opencl_backend && engine.opencl_backend->initialized)
+    {
+        const DeviceStats active = engine.opencl_backend->query_stats();
+        result.metadata.gpu_name = active.device_name;
+        result.metadata.driver_version = active.profile.driver_version;
+        result.metadata.opencl_version = active.profile.opencl_c_version;
+        result.metadata.vram_total_mb = active.total_memory_bytes / (1024 * 1024);
+        result.metadata.vram_free_mb = active.free_memory_bytes / (1024 * 1024);
+        result.metadata.execution_device_config = active.device_name + " (active OpenCL backend)";
+    }
+    else if (!prof.devices.empty())
     {
         result.metadata.gpu_name = prof.devices[0].device_name;
         result.metadata.driver_version = prof.devices[0].profile.driver_version;

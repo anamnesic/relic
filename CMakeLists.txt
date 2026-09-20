@@ -6,6 +6,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(OpenCL REQUIRED)
 
+include(CheckLanguage)
+check_language(CUDA)
+if(CMAKE_CUDA_COMPILER)
+    enable_language(CUDA)
+    set(RELIC_CUDA_SOURCES src/backends/cuda_backend.cu)
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+endif()
+
 if(UNIX AND NOT APPLE)
     set(CMAKE_BUILD_RPATH "/usr/local/lib")
     add_link_options("-Wl,-rpath,/usr/local/lib,--disable-new-dtags")
@@ -42,6 +51,7 @@ add_executable(relic
     src/cli/benchmark_command.cpp
     src/cli/inference_command.cpp
     src/cli/server_command.cpp
+    ${RELIC_CUDA_SOURCES}
 )
 
 add_executable(relic_test
@@ -84,3 +94,16 @@ target_compile_definitions(relic_dump_model PRIVATE CL_TARGET_OPENCL_VERSION=120
 target_include_directories(relic PRIVATE src ${OpenCL_INCLUDE_DIRS})
 target_link_libraries(relic PRIVATE ${OpenCL_LIBRARIES})
 target_compile_definitions(relic PRIVATE CL_TARGET_OPENCL_VERSION=120)
+
+if(CMAKE_CUDA_COMPILER)
+    target_compile_definitions(relic PRIVATE RELIC_HAS_CUDA=1)
+    set_target_properties(relic PROPERTIES CUDA_ARCHITECTURES "75")
+
+    add_executable(relic_cuda_bench
+        src/cuda_bench.cpp
+        src/backends/cuda_backend.cu
+    )
+    target_include_directories(relic_cuda_bench PRIVATE src)
+    target_compile_definitions(relic_cuda_bench PRIVATE RELIC_HAS_CUDA=1)
+    set_target_properties(relic_cuda_bench PROPERTIES CUDA_ARCHITECTURES "75")
+endif()

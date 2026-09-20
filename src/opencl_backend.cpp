@@ -1024,6 +1024,12 @@ DeviceStats OpenClBackend::query_stats()
     st.profile.memory_bandwidth_gbs = 128.0;
     st.profile.dma_transfer_bandwidth_gbs = 6.5;
     st.profile.tflops_fp32 = 2.1;
+    char info[256] = {0};
+    if (clGetDeviceInfo(dev.device, CL_DRIVER_VERSION, sizeof(info), info, nullptr) == CL_SUCCESS)
+        st.profile.driver_version = info;
+    memset(info, 0, sizeof(info));
+    if (clGetDeviceInfo(dev.device, CL_DEVICE_OPENCL_C_VERSION, sizeof(info), info, nullptr) == CL_SUCCESS)
+        st.profile.opencl_c_version = info;
     return st;
 }
 
@@ -1139,4 +1145,3 @@ void OpenClBackend::argmax(BackendBuffer &out_idx, BackendBuffer &logits, int64_
     ClBuffer b_log = ClBuffer::borrow((cl_mem)logits.raw_handle(), logits.size());
     argmax(b_idx, b_log, n);
 }
-

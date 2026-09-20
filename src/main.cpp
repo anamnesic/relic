@@ -9,6 +9,9 @@
 #include "inference.h"
 #include "planner/hardware_profile.h"
 #include "planner/adaptive_planner.h"
+#ifdef RELIC_HAS_CUDA
+#include "backends/cuda_backend.h"
+#endif
 #include <cstdio>
 
 int main(int argc, char **argv)
@@ -58,6 +61,17 @@ int main(int argc, char **argv)
     {
         fprintf(stdout, "Available OpenCL platforms & devices:\n");
         OpenClBackend::list_devices();
+#ifdef RELIC_HAS_CUDA
+        CudaBackend cuda;
+        if (cuda.initialize())
+        {
+            const DeviceStats stats = cuda.query_stats();
+            fprintf(stdout, "\nAvailable CUDA device:\n");
+            fprintf(stdout, "  Device 0: %s [CUDA] (%.1f MB free / %.1f MB, %.1f GB/s theoretical)\n",
+                    stats.device_name.c_str(), stats.free_memory_bytes / 1048576.0,
+                    stats.total_memory_bytes / 1048576.0, stats.memory_bandwidth_gbs);
+        }
+#endif
         return 0;
     }
 

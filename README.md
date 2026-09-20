@@ -107,9 +107,28 @@ pwsh scripts/relic.ps1 run -m model.gguf -p "Hello"
 relic.exe -m model.gguf -p "Hello" --bench --bench-json bench_results.json --bench-csv bench_results.csv
 ```
 
+### CUDA on WSL (NVIDIA)
+
+When `nvcc` is available, CMake builds the native CUDA backend and the
+`relic_cuda_bench` validation tool automatically. CUDA is NVIDIA's officially
+supported compute path on WSL; a separately configured PoCL CUDA device may
+also expose the GTX to the existing OpenCL runtime.
+
+```bash
+cmake -S . -B build-cuda \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-13
+cmake --build build-cuda -j --target relic relic_cuda_bench
+./build-cuda/relic_cuda_bench 500 2000
+```
+
+The CUDA backend currently implements device memory operations, Q4_0/Q8_0
+GEMV, fused Q4_0 SwiGLU, RMSNorm, fused residual RMSNorm, RoPE, Q4_0 embedding
+lookup, and device argmax. OpenCL remains available for Intel/AMD devices while
+the architecture decoders are migrated to the backend-neutral interface.
+
 ---
 
 ## License
 
 MIT
-
