@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 
@@ -292,7 +293,17 @@ int Qwen35DecoderAdapter::forward(const LlamaModel &model, int token_id, int64_t
             {
                 model.dequantize_rows_to_f32(embed, token_id, 1, hidden);
             }
-            clEnqueueWriteBuffer(cl->dev.queue, gpu_hidden.mem, CL_FALSE, 0, (size_t)(n_embd * sizeof(float)), hidden, 0, nullptr, nullptr);
+            clEnqueueWriteBuffer(cl->dev.queue, gpu_hidden.mem, CL_TRUE, 0, (size_t)(n_embd * sizeof(float)), hidden, 0, nullptr, nullptr);
+        }
+
+        static const bool dbg_state = (getenv("RELIC_DEBUG_STATE") != nullptr);
+        if (dbg_state)
+        {
+            double s = 0.0;
+            for (int64_t i = 0; i < n_embd; i++) s += hidden[i];
+            fprintf(stdout, "[state] tok=%d embed[0..2]=%.4f %.4f %.4f sum=%.6f\n",
+                    token_id, hidden[0], hidden[1], hidden[2], s);
+            fflush(stdout);
         }
 
         // Initialize residual stream and pre-normalize for Layer 0
@@ -385,6 +396,25 @@ int Qwen35DecoderAdapter::forward(const LlamaModel &model, int token_id, int64_t
     else
     {
         // CPU reference fallback
+        if (embed.type == GgmlType::F32)
+        {
+            const float *emb_data = (const float *)embed.data.data();
+            memcpy(hidden, emb_data + token_id * n_embd, (size_t)(n_embd * sizeof(float)));
+        }
+        else
+        {
+            model.dequantize_rows_to_f32(embed, token_id, 1, hidden);
+        }
+        static const bool dbg_state_cpu = (getenv("RELIC_DEBUG_STATE") != nullptr);
+        if (dbg_state_cpu)
+        {
+            double s = 0.0;
+            for (int64_t i = 0; i < n_embd; i++) s += hidden[i];
+            fprintf(stdout, "[state] CPU tok=%d embed[0..2]=%.4f %.4f %.4f sum=%.6f\n",
+                    token_id, hidden[0], hidden[1], hidden[2], s);
+            fflush(stdout);
+        }
+
         for (int64_t layer = 0; layer < arch.n_layer; layer++)
         {
             std::string prefix = "blk." + std::to_string(layer) + ".";

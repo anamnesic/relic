@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <random>
 
@@ -113,6 +114,14 @@ std::string InferenceEngine::generate(const std::string &prompt, int max_tokens,
     {
         fprintf(stderr, "Failed to tokenize prompt\n");
         return "";
+    }
+
+    if (getenv("RELIC_DEBUG_TOKENS"))
+    {
+        fprintf(stdout, "[tokens] %zu:", input_tokens.size());
+        for (int t : input_tokens) fprintf(stdout, " %d", t);
+        fprintf(stdout, "\n");
+        fflush(stdout);
     }
 
     std::vector<float> logits((size_t)model->n_vocab, 0.0f);
