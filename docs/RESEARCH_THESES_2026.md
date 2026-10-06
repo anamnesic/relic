@@ -15,6 +15,17 @@ Diferente de frameworks tradicionais (CUDA-only, focados em data centers e GPUs 
 
 ---
 
+## 🔬 Áreas de Foco da Pesquisa
+
+Diretrizes de longo prazo do Anamnesic Labs, absorvidas neste documento:
+
+1. **FlashAttention & Kernel Adaptation:** tradução de *tiling*, *fused softmax* e normalizadores *online* para OpenCL e pipelines de compute com memória restrita.
+2. **Distributed Speculative Decoding:** setups heterogêneos (GPU integrada roda o modelo *draft* 0.5B, GPU discreta verifica os alvos em *batches*).
+3. **Extreme Quantization & Mixed-Precision:** métodos sub-4-bit (NF4, AWQ, variações INT2/3) ajustados aos tetos de banda de memória de hardware legado.
+4. **Mixture-of-Experts (MoE) em VRAM limitada:** pré-fetch dinâmico de especialistas e redução de *page faults* para rodar modelos como Qwen-MoE ou DeepSeek em workstations single-GPU.
+
+---
+
 ## 📊 Matriz de Prioridade dos Trabalhos de 2026
 
 | Prioridade | Trabalho de 2026 | Relevância para o RELIC | Componente / O que implementar no RELIC |

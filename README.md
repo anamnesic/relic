@@ -50,6 +50,8 @@ Validated on this machine: OpenCL compute kernels and layer-by-layer numerical e
 RELIC is architected according to recent literature in consumer-grade LLM inference and data-movement minimization:
 
 * 📄 **[2026 Research Theses & Applied Roadmap](docs/RESEARCH_THESES_2026.md)** — In-depth breakdown of 8 research papers (ATSInfer, Llamas on the Web, Gated DeltaNet, Fast NF4, Cache-Resident Inference, SAW-INT4, FluxBin, Linear Attention) and their implementation in RELIC.
+* 🎯 **[Caicos XT — Target Hardware & Feasibility Notes](docs/hardware/CAICOS-XT.md)** — Baseline profiling of the legacy 1 GB Terascale 2 target and why mainstream engines (vanilla `llama.cpp`) fail on OpenCL 1.2.
+* 📚 **[Paper Compilations](docs/papers/)** — Curated reading lists on context management / multi-agent systems and on research-to-revenue paths.
 
 ---
 
