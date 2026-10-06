@@ -339,7 +339,7 @@ struct GpuTensorStore {
 
             ClBuffer buf;
             if (!buf.alloc(ctx, q4_bytes)) return false;
-            cl_int err = clEnqueueWriteBuffer(queue, buf.mem, CL_FALSE, 0, q4_bytes, q4_data.data(), 0, nullptr, nullptr);
+            cl_int err = clEnqueueWriteBuffer(queue, buf.mem, CL_TRUE, 0, q4_bytes, q4_data.data(), 0, nullptr, nullptr);
             if (err != CL_SUCCESS) return false;
 
             buffers[name] = std::move(buf);
@@ -351,7 +351,7 @@ struct GpuTensorStore {
         // Direct upload for F32, Q4_0, etc.
         ClBuffer buf;
         if (!buf.alloc(ctx, bytes)) return false;
-        cl_int err = clEnqueueWriteBuffer(queue, buf.mem, CL_FALSE, 0, bytes, host_data, 0, nullptr, nullptr);
+        cl_int err = clEnqueueWriteBuffer(queue, buf.mem, CL_TRUE, 0, bytes, host_data, 0, nullptr, nullptr);
         if (err != CL_SUCCESS) return false;
 
         buffers[name] = std::move(buf);

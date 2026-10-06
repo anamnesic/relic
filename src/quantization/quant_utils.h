@@ -98,6 +98,20 @@ namespace relic::quant
         }
     }
 
+    inline void get_scale_min_k4(int j, const uint8_t *q, uint8_t *d, uint8_t *m)
+    {
+        if (j < 4)
+        {
+            *d = (uint8_t)(q[j] & 63);
+            *m = (uint8_t)(q[j + 4] & 63);
+        }
+        else
+        {
+            *d = (uint8_t)((q[j + 4] & 0x0F) | ((q[j - 4] >> 6) << 4));
+            *m = (uint8_t)((q[j + 4] >> 4) | ((q[j] >> 6) << 4));
+        }
+    }
+
     inline void dequantize_rows(GgmlType type, const uint8_t *data, int64_t row_size,
                                 int64_t start_row, int64_t num_rows, float *out)
     {
@@ -138,6 +152,31 @@ namespace relic::quant
             }
             break;
         }
+        case GgmlType::Q4_1:
+        {
+            size_t bytes_per_row = (size_t)((row_size + 31) / 32) * 20;
+            for (int64_t r = 0; r < num_rows; r++)
+            {
+                const uint8_t *src_row = data + (start_row + r) * bytes_per_row;
+                int64_t n_blocks = row_size / 32;
+                float *out_row = out + r * row_size;
+                for (int64_t b = 0; b < n_blocks; b++)
+                {
+                    const uint8_t *block = src_row + b * 20;
+                    float d = half_bits_to_float(*(const uint16_t *)block);
+                    float m = half_bits_to_float(*(const uint16_t *)(block + 2));
+                    const uint8_t *qs = block + 4;
+                    for (int64_t i = 0; i < 16; i++)
+                    {
+                        int x0 = qs[i] & 0x0F;
+                        int x1 = qs[i] >> 4;
+                        out_row[b * 32 + i] = (float)x0 * d + m;
+                        out_row[b * 32 + i + 16] = (float)x1 * d + m;
+                    }
+                }
+            }
+            break;
+        }
         case GgmlType::Q4_K:
         {
             size_t bytes_per_row = (size_t)((row_size + 255) / 256) * 144;
@@ -149,18 +188,62 @@ namespace relic::quant
                 for (int64_t sb = 0; sb < n_super_blocks; sb++)
                 {
                     const uint8_t *b_sb = src_row + sb * 144;
-                    uint16_t d_raw = *(const uint16_t *)b_sb;
-                    uint16_t dmin_raw = *(const uint16_t *)(b_sb + 2);
-                    float d = half_bits_to_float(d_raw);
-                    float dmin = half_bits_to_float(dmin_raw);
-                    const uint8_t *qs = b_sb + 16;
-                    for (int64_t i = 0; i < 128; i++)
+                    float d = half_bits_to_float(*(const uint16_t *)b_sb);
+                    float min = half_bits_to_float(*(const uint16_t *)(b_sb + 2));
+                    const uint8_t *scales = b_sb + 4;
+                    const uint8_t *q = b_sb + 16;
+                    float *y = out_row + sb * 256;
+                    int is = 0;
+                    uint8_t sc = 0, mn = 0;
+                    for (int j = 0; j < 256; j += 64)
                     {
-                        uint8_t q = qs[i];
-                        int q0 = q & 0x0F;
-                        int q1 = q >> 4;
-                        out_row[sb * 256 + i] = (float)q0 * d - dmin;
-                        out_row[sb * 256 + i + 128] = (float)q1 * d - dmin;
+                        get_scale_min_k4(is + 0, scales, &sc, &mn);
+                        float d1 = d * (float)sc, m1 = min * (float)mn;
+                        get_scale_min_k4(is + 1, scales, &sc, &mn);
+                        float d2 = d * (float)sc, m2 = min * (float)mn;
+                        for (int l = 0; l < 32; l++) *y++ = d1 * (float)(q[l] & 0x0F) - m1;
+                        for (int l = 0; l < 32; l++) *y++ = d2 * (float)(q[l] >> 4) - m2;
+                        q += 32;
+                        is += 2;
+                    }
+                }
+            }
+            break;
+        }
+        case GgmlType::Q5_K:
+        {
+            size_t bytes_per_row = (size_t)((row_size + 255) / 256) * 176;
+            for (int64_t r = 0; r < num_rows; r++)
+            {
+                const uint8_t *src_row = data + (start_row + r) * bytes_per_row;
+                int64_t n_super_blocks = row_size / 256;
+                float *out_row = out + r * row_size;
+                for (int64_t sb = 0; sb < n_super_blocks; sb++)
+                {
+                    const uint8_t *b_sb = src_row + sb * 176;
+                    float d = half_bits_to_float(*(const uint16_t *)b_sb);
+                    float min = half_bits_to_float(*(const uint16_t *)(b_sb + 2));
+                    const uint8_t *scales = b_sb + 4;
+                    const uint8_t *qh = b_sb + 16;
+                    const uint8_t *ql = b_sb + 48;
+                    float *y = out_row + sb * 256;
+                    int is = 0;
+                    uint8_t u1 = 1, u2 = 2;
+                    uint8_t sc = 0, mn = 0;
+                    for (int j = 0; j < 256; j += 64)
+                    {
+                        get_scale_min_k4(is + 0, scales, &sc, &mn);
+                        float d1 = d * (float)sc, m1 = min * (float)mn;
+                        get_scale_min_k4(is + 1, scales, &sc, &mn);
+                        float d2 = d * (float)sc, m2 = min * (float)mn;
+                        for (int l = 0; l < 32; l++)
+                            *y++ = d1 * (float)((ql[l] & 0x0F) + ((qh[l] & u1) ? 16 : 0)) - m1;
+                        for (int l = 0; l < 32; l++)
+                            *y++ = d2 * (float)((ql[l] >> 4) + ((qh[l] & u2) ? 16 : 0)) - m2;
+                        ql += 32;
+                        is += 2;
+                        u1 = (uint8_t)(u1 << 2);
+                        u2 = (uint8_t)(u2 << 2);
                     }
                 }
             }
@@ -177,28 +260,29 @@ namespace relic::quant
                 for (int64_t sb = 0; sb < n_super_blocks; sb++)
                 {
                     const uint8_t *b_sb = src_row + sb * 210;
+                    float d = half_bits_to_float(*(const uint16_t *)(b_sb + 208));
                     const uint8_t *ql = b_sb;
                     const uint8_t *qh = b_sb + 128;
-                    const int8_t *scales = (const int8_t *)(b_sb + 192);
-                    uint16_t d_raw = *(const uint16_t *)(b_sb + 208);
-                    float d = half_bits_to_float(d_raw);
-
-                    for (int64_t i = 0; i < 128; i++)
+                    const int8_t *sc = (const int8_t *)(b_sb + 192);
+                    float *y = out_row + sb * 256;
+                    for (int n = 0; n < 256; n += 128)
                     {
-                        int ql0 = ql[i] & 0x0F;
-                        int ql1 = ql[i] >> 4;
-                        uint8_t qh_byte = qh[i / 2];
-                        int qh0 = (i % 2 == 0) ? (qh_byte & 0x03) : ((qh_byte >> 2) & 0x03);
-                        int qh1 = (i % 2 == 0) ? ((qh_byte >> 4) & 0x03) : ((qh_byte >> 6) & 0x03);
-
-                        int q0 = (ql0 | (qh0 << 4)) - 32;
-                        int q1 = (ql1 | (qh1 << 4)) - 32;
-
-                        float sc0 = (float)scales[i / 8];
-                        float sc1 = (float)scales[(i + 128) / 8];
-
-                        out_row[sb * 256 + i] = d * sc0 * (float)q0;
-                        out_row[sb * 256 + i + 128] = d * sc1 * (float)q1;
+                        for (int l = 0; l < 32; l++)
+                        {
+                            int is = l / 16;
+                            int q1 = ((ql[l] & 0x0F) | (((qh[l] >> 0) & 3) << 4)) - 32;
+                            int q2 = ((ql[l + 32] & 0x0F) | (((qh[l] >> 2) & 3) << 4)) - 32;
+                            int q3 = ((ql[l] >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32;
+                            int q4 = ((ql[l + 32] >> 4) | (((qh[l] >> 6) & 3) << 4)) - 32;
+                            y[l + 0] = d * (float)sc[is + 0] * (float)q1;
+                            y[l + 32] = d * (float)sc[is + 2] * (float)q2;
+                            y[l + 64] = d * (float)sc[is + 4] * (float)q3;
+                            y[l + 96] = d * (float)sc[is + 6] * (float)q4;
+                        }
+                        y += 128;
+                        ql += 64;
+                        qh += 32;
+                        sc += 8;
                     }
                 }
             }

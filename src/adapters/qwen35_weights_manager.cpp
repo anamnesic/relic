@@ -135,6 +135,7 @@ void Qwen35WeightsManager::ensure_weights_uploaded(const LlamaModel &model)
 
         BackendDeviceType target_dev = BackendDeviceType::NVIDIA_GPU;
         bool keep_in_vram = true;
+        bool in_plan = false;
         if (plan_)
         {
             auto it = plan_->tensor_placements.find(kv.first);
@@ -142,9 +143,12 @@ void Qwen35WeightsManager::ensure_weights_uploaded(const LlamaModel &model)
             {
                 target_dev = it->second.target_device;
                 keep_in_vram = it->second.keep_resident_in_vram;
+                in_plan = true;
             }
         }
+        static const bool dbg_place = (getenv("RELIC_DEBUG_PLACEMENT") != nullptr);
 
+        const char *status = "none";
         if (target_dev == BackendDeviceType::INTEL_IGPU && intel_backend_)
         {
             auto uhd_buf = intel_backend_->allocate(kv.second.data.size(), MemoryTier::TIER1_SHARED_IGPU);
@@ -153,10 +157,17 @@ void Qwen35WeightsManager::ensure_weights_uploaded(const LlamaModel &model)
                 intel_backend_->upload(*uhd_buf, kv.second.data.data(), kv.second.data.size());
                 intel_tensors_[kv.first] = std::move(uhd_buf);
                 total_uploaded += kv.second.data.size();
+                status = "intel";
             }
+            else status = "intel_fail";
         }
-        else if (target_dev == BackendDeviceType::NVIDIA_GPU && keep_in_vram)
+        else if (keep_in_vram)
         {
+            // Resident on the active OpenCL device. This is the default for every
+            // BackendDeviceType the planner can name (NVIDIA/AMD/CPU/unknown): when the
+            // plan marks a tensor resident, its buffer must exist on the device that
+            // actually executes the kernels. Skipping this silently degrades paths that
+            // require a device buffer (e.g. ssm_conv1d, ssm_a/dt/norm) to null pointers.
             if (kv.first.find("norm") != std::string::npos || kv.first.find("bias") != std::string::npos)
             {
                 // Pre-dequantize all norm weights to resident F32 in VRAM once!
@@ -165,15 +176,21 @@ void Qwen35WeightsManager::ensure_weights_uploaded(const LlamaModel &model)
                 if (gpu_store_.upload_auto_q4(cl_->dev.context, cl_->dev.queue, kv.first, norm_f32.data(), norm_f32.size() * sizeof(float), GgmlType::F32, kv.second.nelements(), uploaded_bytes))
                 {
                     total_uploaded += uploaded_bytes;
+                    status = "vram_f32norm";
                 }
+                else status = "vram_norm_fail";
             }
             else if (gpu_store_.upload_auto_q4(cl_->dev.context, cl_->dev.queue, kv.first, kv.second.data.data(), kv.second.data.size(), kv.second.type, kv.second.nelements(), uploaded_bytes))
             {
                 total_uploaded += uploaded_bytes;
+                status = "vram";
             }
+            else status = "vram_fail";
         }
-        else if (target_dev == BackendDeviceType::CPU_AVX2 || !keep_in_vram)
+        else
         {
+            // Plan says "do not keep resident": stream through pinned host RAM.
+            status = "pinned";
             if (pinned_pool_)
             {
                 void *p = pinned_pool_->allocate_pinned(kv.second.data.size());
@@ -183,7 +200,15 @@ void Qwen35WeightsManager::ensure_weights_uploaded(const LlamaModel &model)
                     pinned_tensor_ptrs_[kv.first] = p;
                     total_offloaded_to_host += kv.second.data.size();
                 }
+                else status = "pinned_fail";
             }
+            else status = "no_pinned_pool";
+        }
+        if (dbg_place)
+        {
+            fprintf(stderr, "[PLACE] %-46s dev=%d vram=%d plan=%d -> %s (type=%d bytes=%zu)\n",
+                    kv.first.c_str(), (int)target_dev, keep_in_vram ? 1 : 0, in_plan ? 1 : 0,
+                    status, (int)kv.second.type, kv.second.data.size());
         }
     }
     clFinish(cl_->dev.queue);
@@ -214,6 +239,7 @@ GgmlType Qwen35WeightsManager::get_tensor_type(const std::string &name, GgmlType
 void Qwen35WeightsManager::dispatch_gemv(ClBuffer &dst, ClBuffer &in, const std::string &name,
                                         const LlamaModel::Tensor &t, int64_t N, int64_t K, int64_t layer_idx)
 {
+    static const bool dbg_disp = (getenv("RELIC_DEBUG_DISPATCH") != nullptr);
     // 1. Check if resident in dedicated VRAM
     ClBuffer *w_buf = gpu_store_.get(name);
     GgmlType actual_type = gpu_store_.get_type(name, t.type);
@@ -222,26 +248,31 @@ void Qwen35WeightsManager::dispatch_gemv(ClBuffer &dst, ClBuffer &in, const std:
         if (actual_type == GgmlType::Q4_0)
         {
             cl_->gemv_q4_0(dst, in, *w_buf, N, K);
+            if (dbg_disp) fprintf(stderr, "[DISPATCH] %-46s -> vram_q4_0 (type=%d N=%lld K=%lld)\n", name.c_str(), (int)actual_type, (long long)N, (long long)K);
             return;
         }
         else if (actual_type == GgmlType::Q8_0)
         {
             cl_->gemv_q8_0(dst, in, *w_buf, N, K);
+            if (dbg_disp) fprintf(stderr, "[DISPATCH] %-46s -> vram_q8_0 (type=%d N=%lld K=%lld)\n", name.c_str(), (int)actual_type, (long long)N, (long long)K);
             return;
         }
         else if (actual_type == GgmlType::Q4_K)
         {
             cl_->gemv_q4_k(dst, in, *w_buf, N, K);
+            if (dbg_disp) fprintf(stderr, "[DISPATCH] %-46s -> vram_q4_k (type=%d N=%lld K=%lld)\n", name.c_str(), (int)actual_type, (long long)N, (long long)K);
             return;
         }
         else if (actual_type == GgmlType::Q6_K)
         {
             cl_->gemv_q6_k(dst, in, *w_buf, N, K);
+            if (dbg_disp) fprintf(stderr, "[DISPATCH] %-46s -> vram_q6_k (type=%d N=%lld K=%lld)\n", name.c_str(), (int)actual_type, (long long)N, (long long)K);
             return;
         }
         else if (actual_type == GgmlType::F32)
         {
             cl_->gemv_f32_nt(dst, in, *w_buf, N, K);
+            if (dbg_disp) fprintf(stderr, "[DISPATCH] %-46s -> vram_f32 (type=%d N=%lld K=%lld)\n", name.c_str(), (int)actual_type, (long long)N, (long long)K);
             return;
         }
     }
@@ -319,6 +350,8 @@ void Qwen35WeightsManager::dispatch_gemv(ClBuffer &dst, ClBuffer &in, const std:
         }
     }
 
+    if (dbg_disp) fprintf(stderr, "[DISPATCH] %-46s -> cpu_fallback (type=%d N=%lld K=%lld resident=%d pinned=%d)\n", name.c_str(), (int)t.type, (long long)N, (long long)K, w_buf ? 1 : 0, (pinned_tensor_ptrs_.count(name) > 0) ? 1 : 0);
+
     // 4. Fallback: chunked dequantization to staging buffer
     const int64_t chunk_n = 4096;
     for (int64_t start_n = 0; start_n < N; start_n += chunk_n)
@@ -329,7 +362,7 @@ void Qwen35WeightsManager::dispatch_gemv(ClBuffer &dst, ClBuffer &in, const std:
         int64_t valid_rows = std::min(cur_n, total_rows - start_n);
         relic::quant::dequantize_rows(t.type, t.data.data(), row_size, start_n, valid_rows, staging_weights_.data());
 
-        clEnqueueWriteBuffer(cl_->dev.queue, gpu_weights_.mem, CL_FALSE, 0, (size_t)(cur_n * K * sizeof(float)), staging_weights_.data(), 0, nullptr, nullptr);
+        clEnqueueWriteBuffer(cl_->dev.queue, gpu_weights_.mem, CL_TRUE, 0, (size_t)(cur_n * K * sizeof(float)), staging_weights_.data(), 0, nullptr, nullptr);
         cl_->matmul_f32_nt(gpu_act_dst_, in, gpu_weights_, 1, cur_n, K);
         clEnqueueCopyBuffer(cl_->dev.queue, gpu_act_dst_.mem, dst.mem, 0, (size_t)(start_n * sizeof(float)), (size_t)(cur_n * sizeof(float)), 0, nullptr, nullptr);
     }

@@ -79,6 +79,8 @@ void Qwen35RecurrentBlock::forward(int64_t layer, const ArchitectureSpec &arch, 
     }
     else
     {
+        fprintf(stderr, "[qwen35] ERROR: %sssm_conv1d.weight is not resident on the device; "
+                        "Conv1D is skipped and recurrent output will be wrong.\n", prefix.c_str());
         cl_->copy(gpu_conv_out, gpu_conv_in, total_qkv);
     }
 

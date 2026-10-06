@@ -404,6 +404,16 @@ kernel void gemv_q8_0(
 //------------------------------------------------------------------------------
 // Native GEMV Q4_K for GGUF k-quants (144 bytes per 256 weights)
 //------------------------------------------------------------------------------
+inline uchar q4_k_scale(global const uchar *scales, int j) {
+    if (j < 4) return scales[j] & 63;
+    return (uchar)((scales[j + 4] & 0x0F) | ((scales[j - 4] >> 6) << 4));
+}
+
+inline uchar q4_k_min(global const uchar *scales, int j) {
+    if (j < 4) return scales[j + 4] & 63;
+    return (uchar)((scales[j + 4] >> 4) | ((scales[j] >> 6) << 4));
+}
+
 kernel void gemv_q4_k(
     global const float *a,          // [K]
     global const uchar *b,          // [N * (K / 256 * 144)]
@@ -420,20 +430,27 @@ kernel void gemv_q4_k(
     float acc = 0.0f;
     for (int sb = 0; sb < n_super_blocks; sb++) {
         global const uchar *b_sb = b_row + sb * 144;
-        ushort d_raw = (ushort)b_sb[0] | ((ushort)b_sb[1] << 8);
-        ushort dmin_raw = (ushort)b_sb[2] | ((ushort)b_sb[3] << 8);
-        float d = fp16_to_fp32(d_raw);
-        float dmin = fp16_to_fp32(dmin_raw);
-
+        float d   = fp16_to_fp32((ushort)b_sb[0] | ((ushort)b_sb[1] << 8));
+        float dmin = fp16_to_fp32((ushort)b_sb[2] | ((ushort)b_sb[3] << 8));
+        global const uchar *scales = b_sb + 4;
         global const uchar *qs = b_sb + 16;
         global const float *a_ptr = a + sb * 256;
 
-        for (int i = 0; i < 128; i++) {
-            uchar q = qs[i];
-            int q0 = q & 0x0F;
-            int q1 = q >> 4;
-            acc += a_ptr[i] * ((float)q0 * d - dmin);
-            acc += a_ptr[i + 128] * ((float)q1 * d - dmin);
+        int is = 0;
+        for (int n = 0; n < 256; n += 64) {
+            float d1 = d * (float)q4_k_scale(scales, is + 0);
+            float m1 = dmin * (float)q4_k_min(scales, is + 0);
+            float d2 = d * (float)q4_k_scale(scales, is + 1);
+            float m2 = dmin * (float)q4_k_min(scales, is + 1);
+
+            global const uchar *q = qs + (n >> 1);
+            for (int l = 0; l < 32; l++) {
+                acc += a_ptr[n + l] * (d1 * (float)(q[l] & 0x0F) - m1);
+            }
+            for (int l = 0; l < 32; l++) {
+                acc += a_ptr[n + 32 + l] * (d2 * (float)(q[l] >> 4) - m2);
+            }
+            is += 2;
         }
     }
     dst[row] = acc;
@@ -460,27 +477,26 @@ kernel void gemv_q6_k(
         global const uchar *b_sb = b_row + sb * 210;
         global const uchar *ql = b_sb;
         global const uchar *qh = b_sb + 128;
-        global const char *scales = (global const char *)(b_sb + 192);
-        ushort d_raw = (ushort)b_sb[208] | ((ushort)b_sb[209] << 8);
-        float d = fp16_to_fp32(d_raw);
-
+        global const char  *sc = (global const char *)(b_sb + 192);
+        float d = fp16_to_fp32((ushort)b_sb[208] | ((ushort)b_sb[209] << 8));
         global const float *a_ptr = a + sb * 256;
 
-        for (int i = 0; i < 128; i++) {
-            int ql0 = ql[i] & 0x0F;
-            int ql1 = ql[i] >> 4;
-            int qh_byte = qh[i / 2];
-            int qh0 = (i % 2 == 0) ? (qh_byte & 0x03) : ((qh_byte >> 2) & 0x03);
-            int qh1 = (i % 2 == 0) ? ((qh_byte >> 4) & 0x03) : ((qh_byte >> 6) & 0x03);
+        for (int n = 0; n < 256; n += 128) {
+            for (int l = 0; l < 32; l++) {
+                int is = l / 16;
+                int q1 = ((ql[l +  0] & 0x0F) | (((qh[l] >> 0) & 3) << 4)) - 32;
+                int q2 = ((ql[l + 32] & 0x0F) | (((qh[l] >> 2) & 3) << 4)) - 32;
+                int q3 = ((ql[l +  0] >> 4)   | (((qh[l] >> 4) & 3) << 4)) - 32;
+                int q4 = ((ql[l + 32] >> 4)   | (((qh[l] >> 6) & 3) << 4)) - 32;
 
-            int q0 = (ql0 | (qh0 << 4)) - 32;
-            int q1 = (ql1 | (qh1 << 4)) - 32;
-
-            float sc0 = (float)scales[i / 8];
-            float sc1 = (float)scales[(i + 128) / 8];
-
-            acc += a_ptr[i] * (d * sc0 * (float)q0);
-            acc += a_ptr[i + 128] * (d * sc1 * (float)q1);
+                acc += a_ptr[n + l +  0] * (d * (float)sc[is + 0] * (float)q1);
+                acc += a_ptr[n + l + 32] * (d * (float)sc[is + 2] * (float)q2);
+                acc += a_ptr[n + l + 64] * (d * (float)sc[is + 4] * (float)q3);
+                acc += a_ptr[n + l + 96] * (d * (float)sc[is + 6] * (float)q4);
+            }
+            ql += 64;
+            qh += 32;
+            sc += 8;
         }
     }
     dst[row] = acc;

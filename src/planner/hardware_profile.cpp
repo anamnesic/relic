@@ -151,7 +151,24 @@ HardwareProfile HardwareProfile::probe_system()
                 clGetDeviceInfo(d, CL_DEVICE_HOST_UNIFIED_MEMORY, sizeof(unified), &unified, nullptr);
                 st.profile.is_unified_memory = (unified == CL_TRUE);
 
-                if (st.device_name.find("GeForce") != std::string::npos || st.device_name.find("NVIDIA") != std::string::npos || st.device_name.find("Quadro") != std::string::npos)
+                // Classify by the actual OpenCL device type first: a CPU device is a CPU
+                // regardless of the vendor string (e.g. "Intel(R) Xeon(R) CPU" on PoCL is
+                // NOT an integrated GPU). Vendor-name heuristics only apply to GPU devices.
+                cl_device_type dtype = 0;
+                clGetDeviceInfo(d, CL_DEVICE_TYPE, sizeof(dtype), &dtype, nullptr);
+                const bool is_cpu_device = (dtype & CL_DEVICE_TYPE_CPU) != 0;
+                const bool is_gpu_device = (dtype & (CL_DEVICE_TYPE_GPU | CL_DEVICE_TYPE_ACCELERATOR)) != 0;
+
+                if (is_cpu_device && !is_gpu_device)
+                {
+                    st.type = BackendDeviceType::CPU_AVX2;
+                    st.memory_bandwidth_gbs = 25.6;       // Host DDR bandwidth (same class as iGPU)
+                    st.dma_transfer_bandwidth_gbs = 25.6; // No discrete transfer path
+                    st.tflops_fp32 = 0.55;
+                    st.profile.is_unified_memory = true;
+                    st.profile.subgroup_size = 16;
+                }
+                else if (st.device_name.find("GeForce") != std::string::npos || st.device_name.find("NVIDIA") != std::string::npos || st.device_name.find("Quadro") != std::string::npos)
                 {
                     st.type = BackendDeviceType::NVIDIA_GPU;
                     st.memory_bandwidth_gbs = 128.0;      // GTX 1650 GDDR6
