@@ -1,0 +1,3 @@
+[submodule "runtime/llm-on-legacy-gpus"]
+	path = runtime/llm-on-legacy-gpus
+	url = https://github.com/chronokairolegacy/llm-on-legacy-gpus.git

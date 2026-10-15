@@ -1,0 +1,68 @@
+{
+    "project": "caicos_inference",
+    "target_gpu": {
+        "windows_name": "AMD Radeon HD 7000 series",
+        "vendor_id": "1002",
+        "device_id": "6778",
+        "pci_id": "PCI\\VEN_1002&DEV_6778",
+        "chip": "Caicos XT",
+        "common_marketing_names": [
+            "Radeon HD 7470",
+            "Radeon HD 8470",
+            "R5 235",
+            "R5 310"
+        ],
+        "driver_version": "15.201.1151.1008",
+        "vram_bytes": 1073741824
+    },
+    "focus": [
+        "OpenCL",
+        "llama.cpp forks",
+        "AMD legacy GPUs",
+        "lightweight inference"
+    ],
+    "repositories": [
+        {
+            "name": "adreno-llms",
+            "owner": "a8nova",
+            "url": "https://github.com/a8nova/adreno-llms",
+            "why": "SOTA small LMs tuned for Adreno 6xx GPUs on non-flagship Android phones. Pure C++/OpenCL.",
+            "category": "OpenCL"
+        },
+        {
+            "name": "BitNet-rs",
+            "owner": "EffortlessMetrics",
+            "url": "https://github.com/EffortlessMetrics/BitNet-rs",
+            "why": "Rust inference engine for 1-bit BitNet LLMs, compatible with GGUF and llama.cpp.",
+            "category": "lightweight-inference"
+        },
+        {
+            "name": "llama.cpp",
+            "owner": "pt13762104",
+            "url": "https://github.com/pt13762104/llama.cpp",
+            "why": "Fork with patches for TU11x devices, useful as a reference for GPU-compatibility experiments.",
+            "category": "llama.cpp-fork"
+        },
+        {
+            "name": "llamacpp-gfx906-furnace",
+            "owner": "362132718",
+            "url": "https://github.com/362132718/llamacpp-gfx906-furnace",
+            "why": "AMD fork with custom kernels, TurboQuant and HIP bug fixes for gfx906.",
+            "category": "AMD-fork"
+        },
+        {
+            "name": "AMD_iGPU_AI_Setup",
+            "owner": "eliranwong",
+            "url": "https://github.com/eliranwong/AMD_iGPU_AI_Setup",
+            "why": "Setup and speed test repo for AMD iGPU AI using llama.cpp, ROCm and Vulkan.",
+            "category": "AMD-setup"
+        },
+        {
+            "name": "build-llama-cpp",
+            "owner": "stoflom",
+            "url": "https://github.com/stoflom/build-llama-cpp",
+            "why": "Practical notes for building and running llama.cpp on AMD hardware.",
+            "category": "build-notes"
+        }
+    ]
+}
